@@ -1,8 +1,8 @@
 (() => {
   'use strict';
 
-  const ORG = 'Team Tasks'; // change to your organisation's name
-  const DEFAULT_TEAMS = ['Social Media', 'Production', 'BD']; // suggestions only; any team name works
+  const ORG = 'Hashcut'; // change to your organisation's name
+  const DEFAULT_TEAMS = ['Social Media Team', 'Production Team', 'BD Team', 'Community Ops Team']; // suggestions only; any team name works
   const DAY = 864e5;
 
   const root = document.getElementById('app');

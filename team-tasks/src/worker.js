@@ -211,14 +211,15 @@ async function changeOwnPassword(request, env, user) {
 
 const TASK_SELECT = `
   SELECT t.id, t.title, t.description, t.deadline, t.status, t.completed_at, t.created_at,
-         t.assignee_id, u.name AS assignee_name, u.team AS assignee_team
+         t.assignee_id, t.assigned_by, u.name AS assignee_name, u.team AS assignee_team
     FROM tasks t JOIN users u ON u.id = t.assignee_id`;
 
 async function listTasks(env, user, url) {
   const mineOnly = user.role !== 'admin' || url.searchParams.get('mine') === '1';
+  // "All tasks" covers team members only; an admin's own notes stay in their My tasks.
   const sql =
     TASK_SELECT +
-    (mineOnly ? ' WHERE t.assignee_id = ?' : '') +
+    (mineOnly ? ' WHERE t.assignee_id = ?' : " WHERE u.role = 'member'") +
     ' ORDER BY t.deadline IS NULL, t.deadline ASC, t.id DESC LIMIT 1000';
   const stmt = env.DB.prepare(sql);
   const { results } = await (mineOnly ? stmt.bind(user.id) : stmt).all();
@@ -230,26 +231,32 @@ async function createTasks(request, env, user) {
   const title = clean(body.title, 200);
   const description = clean(body.description, 2000);
   const dl = parseDeadline(body.deadline);
-  const ids = [...new Set((Array.isArray(body.assignee_ids) ? body.assignee_ids : []).map(Number))].filter(Number.isInteger);
-
   if (!title) return fail(400, 'Give the task a title.');
   if (!dl.ok) return fail(400, 'That deadline is not a valid date.');
+
+  const now = Date.now();
+  const insert = env.DB.prepare(
+    `INSERT INTO tasks (title, description, assignee_id, assigned_by, deadline, status, created_at)
+     VALUES (?, ?, ?, ?, ?, 'pending', ?)`
+  );
+
+  // An admin's own note to self.
+  if (body.personal === true) {
+    await insert.bind(title, description, user.id, user.id, dl.value, now).run();
+    return json({ ok: true, created: 1 }, 201);
+  }
+
+  const ids = [...new Set((Array.isArray(body.assignee_ids) ? body.assignee_ids : []).map(Number))].filter(Number.isInteger);
   if (!ids.length) return fail(400, 'Pick at least one person.');
   if (ids.length > 100) return fail(400, 'Too many people selected.');
 
   const marks = ids.map(() => '?').join(',');
-  const { results } = await env.DB.prepare(`SELECT id FROM users WHERE active = 1 AND id IN (${marks})`).bind(...ids).all();
+  const { results } = await env.DB.prepare(
+    `SELECT id FROM users WHERE active = 1 AND role = 'member' AND id IN (${marks})`
+  ).bind(...ids).all();
   if (results.length !== ids.length) return fail(400, 'One of the selected people is not available.');
 
-  const now = Date.now();
-  await env.DB.batch(
-    ids.map((id) =>
-      env.DB.prepare(
-        `INSERT INTO tasks (title, description, assignee_id, assigned_by, deadline, status, created_at)
-         VALUES (?, ?, ?, ?, ?, 'pending', ?)`
-      ).bind(title, description, id, user.id, dl.value, now)
-    )
-  );
+  await env.DB.batch(ids.map((id) => insert.bind(title, description, id, user.id, dl.value, now)));
   return json({ ok: true, created: ids.length }, 201);
 }
 
@@ -276,11 +283,22 @@ async function updateTask(request, env, user, id) {
   const title = clean(body.title, 200);
   const description = clean(body.description, 2000);
   const dl = parseDeadline(body.deadline);
-  const assignee = Number(body.assignee_id);
   if (!title) return fail(400, 'Give the task a title.');
   if (!dl.ok) return fail(400, 'That deadline is not a valid date.');
-  const person = await env.DB.prepare('SELECT id FROM users WHERE id = ? AND active = 1').bind(assignee).first();
-  if (!person) return fail(400, 'Pick an active person.');
+
+  // An admin's own note keeps its owner. Otherwise the person may stay as they are
+  // (even if deactivated) or be changed to an active team member.
+  const personal = task.assigned_by === task.assignee_id;
+  let assignee = task.assignee_id;
+  if (!personal) {
+    assignee = Number(body.assignee_id);
+    if (assignee !== task.assignee_id) {
+      const person = await env.DB.prepare("SELECT id FROM users WHERE id = ? AND active = 1 AND role = 'member'")
+        .bind(assignee)
+        .first();
+      if (!person) return fail(400, 'Pick an active team member.');
+    }
+  }
 
   await env.DB.prepare('UPDATE tasks SET title = ?, description = ?, deadline = ?, assignee_id = ? WHERE id = ?')
     .bind(title, description, dl.value, assignee, id)
@@ -309,13 +327,15 @@ async function createUser(request, env) {
   const body = await readJson(request);
   const username = clean(body.username, 32).toLowerCase();
   const name = clean(body.name, 80);
-  const team = clean(body.team, 40);
   const role = body.role === 'admin' ? 'admin' : 'member';
   const password = String(body.password || '');
 
   if (!/^[a-z0-9._-]{3,32}$/.test(username)) return fail(400, 'Username must be 3–32 characters: letters, numbers, dot, dash or underscore.');
   if (!name) return fail(400, 'Enter a name.');
   if (password.length < 8) return fail(400, 'Password must be at least 8 characters.');
+  const t = await resolveTeam(env, role, body.team);
+  if (!t.ok) return fail(400, 'That team does not exist.');
+  const team = t.value;
 
   const exists = await env.DB.prepare('SELECT id FROM users WHERE username = ?').bind(username).first();
   if (exists) return fail(409, 'That username is taken.');
@@ -336,10 +356,12 @@ async function updateUser(request, env, admin, id) {
   const body = await readJson(request);
 
   const name = body.name !== undefined ? clean(body.name, 80) : target.name;
-  const team = body.team !== undefined ? clean(body.team, 40) : target.team;
   const role = body.role !== undefined ? (body.role === 'admin' ? 'admin' : 'member') : target.role;
   const active = body.active !== undefined ? (body.active ? 1 : 0) : target.active;
   if (!name) return fail(400, 'Enter a name.');
+  const t = await resolveTeam(env, role, body.team !== undefined ? body.team : target.team);
+  if (!t.ok) return fail(400, 'That team does not exist.');
+  const team = t.value;
 
   if (target.id === admin.id && (role !== 'admin' || !active)) {
     return fail(400, 'You cannot remove your own admin access or deactivate yourself.');
@@ -364,6 +386,114 @@ async function updateUser(request, env, admin, id) {
   }
   await env.DB.batch(statements);
   return json({ ok: true });
+}
+
+async function deleteUser(env, admin, id) {
+  if (id === admin.id) return fail(400, 'You cannot delete your own account.');
+  const target = await env.DB.prepare('SELECT id, active FROM users WHERE id = ?').bind(id).first();
+  if (!target) return fail(404, 'Person not found.');
+  if (target.active) return fail(400, 'Deactivate this account first, then you can delete it.');
+
+  // Their tasks go with them; tasks they assigned to others stay (just without an "assigned by").
+  await env.DB.batch([
+    env.DB.prepare('DELETE FROM sessions WHERE user_id = ?').bind(id),
+    env.DB.prepare('DELETE FROM tasks WHERE assignee_id = ?').bind(id),
+    env.DB.prepare('UPDATE tasks SET assigned_by = NULL WHERE assigned_by = ?').bind(id),
+    env.DB.prepare('DELETE FROM users WHERE id = ?').bind(id),
+  ]);
+  return json({ ok: true });
+}
+
+/* ---------- teams (admin) ---------- */
+
+// Admins never belong to a team. Members may have none, or one that exists.
+async function resolveTeam(env, role, raw) {
+  if (role === 'admin') return { ok: true, value: '' };
+  const name = clean(raw, 40);
+  if (!name) return { ok: true, value: '' };
+  const row = await env.DB.prepare('SELECT name FROM teams WHERE name = ?').bind(name).first();
+  return row ? { ok: true, value: row.name } : { ok: false };
+}
+
+async function listTeams(env) {
+  const { results } = await env.DB.prepare(
+    `SELECT t.id, t.name,
+            (SELECT COUNT(*) FROM users u WHERE u.team = t.name AND u.role = 'member' AND u.active = 1) AS members
+       FROM teams t ORDER BY t.name COLLATE NOCASE`
+  ).all();
+  return json({ teams: results });
+}
+
+async function createTeam(request, env) {
+  const body = await readJson(request);
+  const name = clean(body.name, 40);
+  if (!name) return fail(400, 'Enter a team name.');
+  const exists = await env.DB.prepare('SELECT id FROM teams WHERE name = ?').bind(name).first();
+  if (exists) return fail(409, 'There is already a team with that name.');
+  await env.DB.prepare('INSERT INTO teams (name, created_at) VALUES (?, ?)').bind(name, Date.now()).run();
+  return json({ ok: true }, 201);
+}
+
+async function renameTeam(request, env, id) {
+  const team = await env.DB.prepare('SELECT id, name FROM teams WHERE id = ?').bind(id).first();
+  if (!team) return fail(404, 'Team not found.');
+  const body = await readJson(request);
+  const name = clean(body.name, 40);
+  if (!name) return fail(400, 'Enter a team name.');
+  const clash = await env.DB.prepare('SELECT id FROM teams WHERE name = ? AND id != ?').bind(name, id).first();
+  if (clash) return fail(409, 'There is already a team with that name.');
+  await env.DB.batch([
+    env.DB.prepare('UPDATE teams SET name = ? WHERE id = ?').bind(name, id),
+    env.DB.prepare('UPDATE users SET team = ? WHERE team = ?').bind(name, team.name),
+  ]);
+  return json({ ok: true });
+}
+
+async function deleteTeam(env, id) {
+  const team = await env.DB.prepare('SELECT id, name FROM teams WHERE id = ?').bind(id).first();
+  if (!team) return fail(404, 'Team not found.');
+  // People in the team are kept and simply end up with no team.
+  await env.DB.batch([
+    env.DB.prepare("UPDATE users SET team = '' WHERE team = ?").bind(team.name),
+    env.DB.prepare('DELETE FROM teams WHERE id = ?').bind(id),
+  ]);
+  return json({ ok: true });
+}
+
+/* ---------- branding ---------- */
+
+const DEFAULT_ORG = 'Team Tasks';
+const LOGO_RE = /^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/]+=*$/;
+const LOGO_MAX_CHARS = 300000;
+
+async function getBranding(env) {
+  const { results } = await env.DB.prepare("SELECT key, value FROM settings WHERE key IN ('org_name', 'org_logo')").all();
+  const map = Object.fromEntries(results.map((r) => [r.key, r.value]));
+  return json({ name: map.org_name || DEFAULT_ORG, logo: map.org_logo || null });
+}
+
+async function saveBranding(request, env) {
+  const body = await readJson(request);
+  const statements = [];
+
+  if (body.name !== undefined) {
+    const name = clean(body.name, 60);
+    if (!name) return fail(400, 'Enter a name.');
+    statements.push(env.DB.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').bind('org_name', name));
+  }
+  if (body.logo !== undefined) {
+    if (body.logo === null || body.logo === '') {
+      statements.push(env.DB.prepare("DELETE FROM settings WHERE key = 'org_logo'"));
+    } else {
+      const logo = String(body.logo);
+      if (logo.length > LOGO_MAX_CHARS || !LOGO_RE.test(logo)) {
+        return fail(400, 'Logo must be a PNG, JPEG or WebP image under about 200 KB.');
+      }
+      statements.push(env.DB.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').bind('org_logo', logo));
+    }
+  }
+  if (statements.length) await env.DB.batch(statements);
+  return getBranding(env);
 }
 
 /* ---------- router ---------- */
@@ -391,6 +521,7 @@ export default {
       // Public routes
       if (path === '/api/login' && method === 'POST') return await login(request, env, secure);
       if (path === '/api/setup' && method === 'POST') return await setup(request, env);
+      if (path === '/api/branding' && method === 'GET') return await getBranding(env);
 
       const user = await getUser(request, env);
       if (path === '/api/me' && method === 'GET') return await me(env, user);
@@ -398,6 +529,7 @@ export default {
 
       if (!user) return fail(401, 'Please sign in.');
 
+      // Routes open to every signed-in person
       if (path === '/api/password' && method === 'POST') return await changeOwnPassword(request, env, user);
       if (path === '/api/tasks' && method === 'GET') return await listTasks(env, user, url);
 
@@ -412,17 +544,28 @@ export default {
       }
 
       // Everything below is admin only
-      const adminOnly =
-        (path === '/api/tasks' && method === 'POST') ||
-        path === '/api/users' ||
-        /^\/api\/users\/\d+$/.test(path);
-      if (adminOnly && user.role !== 'admin') return fail(403, 'Admins only.');
+      if (user.role !== 'admin') return fail(403, 'Admins only.');
 
       if (path === '/api/tasks' && method === 'POST') return await createTasks(request, env, user);
+      if (path === '/api/branding' && method === 'PUT') return await saveBranding(request, env);
+
       if (path === '/api/users' && method === 'GET') return await listUsers(env);
       if (path === '/api/users' && method === 'POST') return await createUser(request, env);
       const userMatch = path.match(/^\/api\/users\/(\d+)$/);
-      if (userMatch && method === 'PATCH') return await updateUser(request, env, user, Number(userMatch[1]));
+      if (userMatch) {
+        const id = Number(userMatch[1]);
+        if (method === 'PATCH') return await updateUser(request, env, user, id);
+        if (method === 'DELETE') return await deleteUser(env, user, id);
+      }
+
+      if (path === '/api/teams' && method === 'GET') return await listTeams(env);
+      if (path === '/api/teams' && method === 'POST') return await createTeam(request, env);
+      const teamMatch = path.match(/^\/api\/teams\/(\d+)$/);
+      if (teamMatch) {
+        const id = Number(teamMatch[1]);
+        if (method === 'PATCH') return await renameTeam(request, env, id);
+        if (method === 'DELETE') return await deleteTeam(env, id);
+      }
 
       return fail(404, 'Not found.');
     } catch (e) {

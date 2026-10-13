@@ -35,3 +35,25 @@ CREATE TABLE IF NOT EXISTS login_attempts (
   count    INTEGER NOT NULL,
   first_at INTEGER NOT NULL
 );
+
+-- Teams are managed by admins (People > Teams). users.team stores the team name.
+CREATE TABLE IF NOT EXISTS teams (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  name       TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  created_at INTEGER NOT NULL
+);
+
+-- Keep any team names already used by existing people.
+INSERT OR IGNORE INTO teams (name, created_at)
+  SELECT DISTINCT team, 0 FROM users WHERE team != '';
+
+-- Starter teams, only added when there are no teams at all (edit or delete them in the app).
+INSERT INTO teams (name, created_at)
+  SELECT name, 0 FROM (SELECT 'Social Media' AS name UNION ALL SELECT 'Production' UNION ALL SELECT 'BD')
+  WHERE NOT EXISTS (SELECT 1 FROM teams);
+
+-- Organisation name and logo (Settings tab).
+CREATE TABLE IF NOT EXISTS settings (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
