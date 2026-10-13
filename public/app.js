@@ -1,8 +1,7 @@
 (() => {
   'use strict';
 
-  const ORG = 'Hashcut'; // change to your organisation's name.
-  const DEFAULT_TEAMS = ['Social Media Team', 'Production Team', 'BD Team', 'Community Ops Team']; // suggestions only; any team name works
+  const ORG = 'Team Tasks'; // change to your organisation's name
   const DAY = 864e5;
 
   const root = document.getElementById('app');
@@ -13,6 +12,7 @@
     view: 'mine', // mine | all | people
     tasks: [],
     users: [],
+    teams: [],
     status: 'open', // open | done
     person: 'all',
     team: 'all',
@@ -106,6 +106,28 @@
     ['none', 'No deadline'],
   ];
 
+  /* ---------- night mode ---------- */
+
+  const currentTheme = () => (document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light');
+  const themeLabel = () => (currentTheme() === 'dark' ? 'Day mode' : 'Night mode');
+
+  function themeButton(extra = '') {
+    return h(
+      'button',
+      {
+        class: 'link theme-toggle ' + extra,
+        type: 'button',
+        onclick: () => {
+          const next = currentTheme() === 'dark' ? 'light' : 'dark';
+          document.documentElement.setAttribute('data-theme', next);
+          try { localStorage.setItem('theme', next); } catch { /* storage unavailable */ }
+          document.querySelectorAll('.theme-toggle').forEach((b) => (b.textContent = themeLabel()));
+        },
+      },
+      themeLabel()
+    );
+  }
+
   /* ---------- data loading ---------- */
 
   async function loadTasks() {
@@ -117,13 +139,17 @@
     state.users = (await api('/users')).users;
   }
 
+  async function loadTeams() {
+    state.teams = (await api('/teams')).teams;
+  }
+
   async function enter() {
     state.view = 'mine';
     state.status = 'open';
     state.person = 'all';
     state.team = 'all';
     await loadTasks();
-    if (state.user.role === 'admin') await loadUsers();
+    if (state.user.role === 'admin') await Promise.all([loadUsers(), loadTeams()]);
     render();
   }
 
@@ -132,10 +158,10 @@
     state.person = 'all';
     state.team = 'all';
     try {
-      if (view === 'people') await loadUsers();
+      if (view === 'people' || view === 'teams') await Promise.all([loadUsers(), loadTeams()]);
       else {
         await loadTasks();
-        if (view === 'all') await loadUsers();
+        if (view === 'all') await Promise.all([loadUsers(), loadTeams()]);
       }
     } catch (e) {
       toast(e.message);
@@ -175,7 +201,7 @@
       err,
       h('button', { class: 'btn primary', type: 'submit' }, 'Sign in')
     );
-    return h('main', { class: 'auth' }, form);
+    return h('main', { class: 'auth' }, themeButton('floating'), form);
   }
 
   function setupScreen() {
@@ -210,14 +236,14 @@
       err,
       h('button', { class: 'btn primary', type: 'submit' }, 'Create admin account')
     );
-    return h('main', { class: 'auth' }, form);
+    return h('main', { class: 'auth' }, themeButton('floating'), form);
   }
 
   function shell() {
     const u = state.user;
     const admin = u.role === 'admin';
     const tabs = [['mine', 'My tasks']];
-    if (admin) tabs.push(['all', 'All tasks'], ['people', 'People']);
+    if (admin) tabs.push(['all', 'All tasks'], ['people', 'People'], ['teams', 'Teams']);
 
     const header = h(
       'header',
@@ -234,16 +260,19 @@
         'div',
         { class: 'who' },
         h('span', null, u.name),
+        themeButton(),
         h('button', { class: 'link', onclick: passwordDialog }, 'Change password'),
         h('button', { class: 'link', onclick: logout }, 'Sign out')
       )
     );
-    return h('div', null, header, state.view === 'people' ? peopleView() : taskView(state.view === 'all'));
+    const page = state.view === 'people' ? peopleView() : state.view === 'teams' ? teamsView() : taskView(state.view === 'all');
+    return h('div', null, header, page);
   }
 
   /* ---------- tasks view ---------- */
 
   function taskView(all) {
+    const manage = all || state.user.role === 'admin';
     let tasks = state.tasks.slice();
     if (all) {
       if (state.person !== 'all') tasks = tasks.filter((t) => String(t.assignee_id) === state.person);
@@ -263,7 +292,11 @@
         h('h1', null, title),
         h('p', { class: 'summary' }, plural(open.length, 'open task'), overdue ? [', ', h('span', { class: 'late' }, `${overdue} overdue`)] : null)
       ),
-      all ? h('button', { class: 'btn primary', onclick: () => taskDialog() }, 'Assign task') : null
+      all
+        ? h('button', { class: 'btn primary', onclick: () => taskDialog() }, 'Assign task')
+        : state.user.role === 'admin'
+        ? h('button', { class: 'btn primary', onclick: () => taskDialog() }, 'Add my task')
+        : null
     );
 
     const seg = h(
@@ -275,8 +308,8 @@
 
     const toolbar = h('div', { class: 'toolbar' }, seg);
     if (all) {
-      const teams = [...new Set(state.users.map((u) => u.team).filter(Boolean))].sort();
-      const people = state.users.filter((u) => u.active);
+      const teams = state.teams.map((t) => t.name);
+      const people = state.users.filter((u) => u.role === 'member');
       toolbar.append(
         h(
           'select',
@@ -288,7 +321,7 @@
           'select',
           { 'aria-label': 'Filter by person', value: state.person, onchange: (e) => { state.person = e.target.value; render(); } },
           h('option', { value: 'all' }, 'Everyone'),
-          people.map((p) => h('option', { value: String(p.id) }, p.name))
+          people.map((p) => h('option', { value: String(p.id) }, p.name + (p.active ? '' : ' (inactive)')))
         )
       );
     }
@@ -296,7 +329,11 @@
     const content = h('div', null);
     if (state.status === 'open') {
       if (!open.length) {
-        content.append(h('div', { class: 'empty' }, all ? 'No open tasks match these filters.' : 'Nothing on your list. New tasks will show up here.'));
+        content.append(h('div', { class: 'empty' }, all
+            ? 'No open tasks match these filters.'
+            : state.user.role === 'admin'
+            ? 'Nothing on your list. Use "Add my task" to note something down.'
+            : 'Nothing on your list. New tasks will show up here.'));
       }
       for (const [key, label] of GROUPS) {
         const items = open.filter((t) => dueInfo(t).group === key);
@@ -306,20 +343,20 @@
             'section',
             { class: 'group g-' + key },
             h('h2', null, label, h('span', { class: 'count' }, items.length)),
-            h('ul', { class: 'tasks' }, items.map((t) => taskRow(t, all)))
+            h('ul', { class: 'tasks' }, items.map((t) => taskRow(t, all, manage)))
           )
         );
       }
     } else if (!done.length) {
       content.append(h('div', { class: 'empty' }, 'No completed tasks yet.'));
     } else {
-      content.append(h('ul', { class: 'tasks' }, done.map((t) => taskRow(t, all))));
+      content.append(h('ul', { class: 'tasks' }, done.map((t) => taskRow(t, all, manage))));
     }
 
     return h('main', { class: 'page' }, head, toolbar, content);
   }
 
-  function taskRow(t, all) {
+  function taskRow(t, all, manage) {
     const d = dueInfo(t);
     const done = t.status === 'done';
     const check = h(
@@ -345,7 +382,7 @@
         t.description ? h('p', { class: 'desc' }, t.description) : null,
         all ? h('p', { class: 'meta' }, t.assignee_name + (t.assignee_team ? ` · ${t.assignee_team}` : '')) : null
       ),
-      all
+      manage
         ? h(
             'div',
             { class: 'actions' },
@@ -414,48 +451,54 @@
 
   function taskDialog(task) {
     const editing = !!task;
-    const active = state.users.filter((u) => u.active);
+    // A "personal" task is an admin's own to-do: no assignee, private to that admin.
+    const personal = task ? task.assignee_id === state.user.id : state.view === 'mine';
+    const members = state.users.filter((u) => u.role === 'member' && (u.active || (task && u.id === task.assignee_id)));
 
-    let assigneeField;
-    if (editing) {
-      assigneeField = h(
-        'label',
-        { class: 'field' },
-        h('span', null, 'Assigned to'),
-        h('select', { name: 'assignee', value: String(task.assignee_id) }, active.map((u) => h('option', { value: String(u.id) }, u.name + (u.team ? ` (${u.team})` : ''))))
-      );
-    } else {
-      const byTeam = new Map();
-      for (const u of active) {
-        const key = u.team || 'No team';
-        if (!byTeam.has(key)) byTeam.set(key, []);
-        byTeam.get(key).push(u);
-      }
-      const groups = [...byTeam.entries()].map(([team, members]) => {
-        const boxes = members.map((u) =>
-          h('label', { class: 'check-row' }, h('input', { type: 'checkbox', name: 'assignee', value: String(u.id) }), u.name)
+    let assigneeField = null;
+    if (!personal) {
+      if (editing) {
+        assigneeField = h(
+          'label',
+          { class: 'field' },
+          h('span', null, 'Assigned to'),
+          h('select', { name: 'assignee', value: String(task.assignee_id) }, members.map((u) => h('option', { value: String(u.id) }, u.name + (u.team ? ` (${u.team})` : ''))))
         );
-        const toggleAll = h(
-          'button',
-          {
-            type: 'button',
-            class: 'link',
-            onclick: (e) => {
-              const inputs = e.target.closest('fieldset').querySelectorAll('input[type=checkbox]');
-              const allOn = [...inputs].every((i) => i.checked);
-              inputs.forEach((i) => (i.checked = !allOn));
+      } else if (!members.length) {
+        assigneeField = h('p', { class: 'hint' }, 'There are no members yet. Add people under People first.');
+      } else {
+        const byTeam = new Map();
+        for (const u of members) {
+          const key = u.team || 'No team';
+          if (!byTeam.has(key)) byTeam.set(key, []);
+          byTeam.get(key).push(u);
+        }
+        const groups = [...byTeam.entries()].map(([team, list]) => {
+          const boxes = list.map((u) =>
+            h('label', { class: 'check-row' }, h('input', { type: 'checkbox', name: 'assignee', value: String(u.id) }), u.name)
+          );
+          const toggleAll = h(
+            'button',
+            {
+              type: 'button',
+              class: 'link',
+              onclick: (e) => {
+                const inputs = e.target.closest('fieldset').querySelectorAll('input[type=checkbox]');
+                const allOn = [...inputs].every((i) => i.checked);
+                inputs.forEach((i) => (i.checked = !allOn));
+              },
             },
-          },
-          'Select team'
-        );
-        return h('fieldset', null, h('div', { class: 'team-head' }, h('legend', null, team), toggleAll), boxes);
-      });
-      assigneeField = h('div', { class: 'field' }, h('span', null, 'Assign to'), h('div', { class: 'people-pick' }, groups), h('small', null, 'Each person you pick gets their own copy of the task.'));
+            'Select team'
+          );
+          return h('fieldset', null, h('div', { class: 'team-head' }, h('legend', null, team), toggleAll), boxes);
+        });
+        assigneeField = h('div', { class: 'field' }, h('span', null, 'Assign to'), h('div', { class: 'people-pick' }, groups), h('small', null, 'Each person you pick gets their own copy of the task.'));
+      }
     }
 
     formDialog({
-      title: editing ? 'Edit task' : 'Assign a task',
-      submit: editing ? 'Save changes' : 'Assign task',
+      title: personal ? (editing ? 'Edit your task' : 'Add a task for yourself') : editing ? 'Edit task' : 'Assign a task',
+      submit: editing ? 'Save changes' : personal ? 'Add task' : 'Assign task',
       fields: [
         h('label', { class: 'field' }, h('span', null, 'Title'), h('input', { type: 'text', name: 'title', required: true, maxlength: 200, value: task ? task.title : '' })),
         h('label', { class: 'field' }, h('span', null, 'Details (optional)'), h('textarea', { name: 'description', maxlength: 2000 }, task ? task.description : '')),
@@ -475,7 +518,10 @@
           description: fd.get('description'),
           deadline: deadline ? new Date(deadline).toISOString() : null,
         };
-        if (editing) {
+        if (personal) {
+          if (editing) await api('/tasks/' + task.id, { method: 'PUT', body });
+          else await api('/tasks/mine', { method: 'POST', body });
+        } else if (editing) {
           body.assignee_id = Number(fd.get('assignee'));
           await api('/tasks/' + task.id, { method: 'PUT', body });
         } else {
@@ -484,16 +530,30 @@
           await api('/tasks', { method: 'POST', body });
         }
         await loadTasks();
-        await loadUsers();
+        if (state.view === 'all') await loadUsers();
         render();
-        toast(editing ? 'Task updated.' : 'Task assigned.');
+        toast(editing ? 'Task updated.' : personal ? 'Task added.' : 'Task assigned.');
       },
     });
   }
 
   function personDialog(person) {
     const editing = !!person;
-    const teams = [...new Set([...DEFAULT_TEAMS, ...state.users.map((u) => u.team).filter(Boolean)])];
+    const startRole = person ? person.role : 'member';
+
+    // Admins do not belong to a team, so the Team field is hidden while Access is "Admin".
+    const teamField = h(
+      'label',
+      { class: 'field', hidden: startRole === 'admin' },
+      h('span', null, 'Team'),
+      h(
+        'select',
+        { name: 'team', value: person ? person.team : '' },
+        h('option', { value: '' }, 'No team'),
+        state.teams.map((t) => h('option', { value: t.name }, t.name))
+      ),
+      state.teams.length ? null : h('small', null, 'No teams yet. Add some under the Teams tab.')
+    );
 
     formDialog({
       title: editing ? `Edit ${person.name}` : 'Add a person',
@@ -506,16 +566,15 @@
         h(
           'label',
           { class: 'field' },
-          h('span', null, 'Team'),
-          h('input', { type: 'text', name: 'team', list: 'team-list', maxlength: 40, value: person ? person.team : '' }),
-          h('datalist', { id: 'team-list' }, teams.map((t) => h('option', { value: t })))
-        ),
-        h(
-          'label',
-          { class: 'field' },
           h('span', null, 'Access'),
-          h('select', { name: 'role', value: person ? person.role : 'member' }, h('option', { value: 'member' }, 'Member – sees own tasks'), h('option', { value: 'admin' }, 'Admin – manages everyone'))
+          h(
+            'select',
+            { name: 'role', value: startRole, onchange: (e) => { teamField.hidden = e.target.value === 'admin'; } },
+            h('option', { value: 'member' }, 'Member – sees own tasks'),
+            h('option', { value: 'admin' }, 'Admin – manages everyone')
+          )
         ),
+        teamField,
         h(
           'label',
           { class: 'field' },
@@ -523,20 +582,19 @@
           h('input', { type: 'password', name: 'password', minlength: 8, autocomplete: 'new-password', required: !editing }),
           h('small', null, editing ? 'Leave blank to keep the current password. Setting one signs them out everywhere.' : 'At least 8 characters. Share it with them privately.')
         ),
-        editing ? h('label', { class: 'check-row' }, h('input', { type: 'checkbox', name: 'active', checked: !!person.active }), 'Can sign in') : null,
       ],
       onSubmit: async (fd) => {
+        const role = fd.get('role');
+        const team = role === 'admin' ? '' : fd.get('team');
         if (editing) {
-          const body = { name: fd.get('name'), team: fd.get('team'), role: fd.get('role'), active: fd.get('active') === 'on' };
+          const body = { name: fd.get('name'), team, role };
           if (fd.get('password')) body.password = fd.get('password');
           await api('/users/' + person.id, { method: 'PATCH', body });
         } else {
-          await api('/users', {
-            method: 'POST',
-            body: { username: fd.get('username'), name: fd.get('name'), team: fd.get('team'), role: fd.get('role'), password: fd.get('password') },
-          });
+          await api('/users', { method: 'POST', body: { username: fd.get('username'), name: fd.get('name'), team, role, password: fd.get('password') } });
         }
         await loadUsers();
+        await loadTeams();
         render();
         toast(editing ? 'Changes saved.' : 'Person added.');
       },
@@ -560,26 +618,67 @@
 
   /* ---------- people view ---------- */
 
+  async function setActive(u, active) {
+    const message = active
+      ? null
+      : `Deactivate ${u.name}? They will be signed out and cannot sign in until you reactivate them. Their tasks are kept.`;
+    if (message && !confirm(message)) return;
+    try {
+      await api('/users/' + u.id, { method: 'PATCH', body: { active } });
+      await loadUsers();
+      render();
+      toast(active ? `${u.name} can sign in again.` : `${u.name} has been deactivated.`);
+    } catch (e) {
+      toast(e.message);
+    }
+  }
+
+  async function removePerson(u) {
+    const ok = confirm(
+      `Delete ${u.name} permanently?\n\nTheir account and every task assigned to them will be removed. This cannot be undone.\n\nTo keep their task history, use Deactivate instead.`
+    );
+    if (!ok) return;
+    try {
+      await api('/users/' + u.id, { method: 'DELETE' });
+      await Promise.all([loadUsers(), loadTeams()]);
+      render();
+      toast(`${u.name} was deleted.`);
+    } catch (e) {
+      toast(e.message);
+    }
+  }
+
   function peopleView() {
-    const rows = state.users.map((u) =>
-      h(
+    const rows = state.users.map((u) => {
+      const self = u.id === state.user.id;
+      return h(
         'tr',
         { class: u.active ? '' : 'off' },
-        h('td', null, h('strong', null, u.name)),
+        h('td', null, h('strong', null, u.name), self ? h('span', { class: 'you' }, ' (you)') : null),
         h('td', null, u.username),
-        h('td', null, u.team || '–'),
+        h('td', null, u.role === 'admin' ? '–' : u.team || 'No team'),
         h('td', null, h('span', { class: 'badge' + (u.role === 'admin' ? ' admin' : '') }, u.role === 'admin' ? 'Admin' : 'Member')),
-        h('td', null, u.active ? plural(u.open_tasks, 'open task') : 'Cannot sign in'),
-        h('td', null, h('button', { class: 'link', onclick: () => personDialog(u) }, 'Edit'))
-      )
-    );
+        h('td', null, u.active ? plural(u.open_tasks, 'open task') : 'Deactivated'),
+        h(
+          'td',
+          null,
+          h(
+            'div',
+            { class: 'row-actions' },
+            h('button', { class: 'link', onclick: () => personDialog(u) }, 'Edit'),
+            self ? null : h('button', { class: 'link', onclick: () => setActive(u, !u.active) }, u.active ? 'Deactivate' : 'Reactivate'),
+            self ? null : h('button', { class: 'link danger', onclick: () => removePerson(u) }, 'Delete')
+          )
+        )
+      );
+    });
     return h(
       'main',
       { class: 'page' },
       h(
         'div',
         { class: 'page-head' },
-        h('div', null, h('h1', null, 'People'), h('p', { class: 'summary' }, `${plural(state.users.filter((u) => u.active).length, 'active account')}`)),
+        h('div', null, h('h1', null, 'People'), h('p', { class: 'summary' }, plural(state.users.filter((u) => u.active).length, 'active account'))),
         h('button', { class: 'btn primary', onclick: () => personDialog() }, 'Add person')
       ),
       h(
@@ -588,10 +687,91 @@
         h(
           'table',
           null,
-          h('thead', null, h('tr', null, ['Name', 'Username', 'Team', 'Access', 'Workload', ''].map((c) => h('th', { scope: 'col' }, c)))),
+          h('thead', null, h('tr', null, ['Name', 'Username', 'Team', 'Access', 'Workload', 'Actions'].map((c) => h('th', { scope: 'col' }, c)))),
           h('tbody', null, rows)
         )
       )
+    );
+  }
+
+  /* ---------- teams view ---------- */
+
+  function teamDialog(team) {
+    const editing = !!team;
+    formDialog({
+      title: editing ? 'Rename team' : 'Add a team',
+      submit: editing ? 'Save name' : 'Add team',
+      fields: [
+        h('label', { class: 'field' }, h('span', null, 'Team name'), h('input', { type: 'text', name: 'name', required: true, maxlength: 40, value: team ? team.name : '' })),
+        editing ? h('p', { class: 'hint' }, 'Everyone in this team moves to the new name automatically.') : null,
+      ],
+      onSubmit: async (fd) => {
+        if (editing) await api('/teams/' + team.id, { method: 'PATCH', body: { name: fd.get('name') } });
+        else await api('/teams', { method: 'POST', body: { name: fd.get('name') } });
+        await Promise.all([loadTeams(), loadUsers()]);
+        render();
+        toast(editing ? 'Team renamed.' : 'Team added.');
+      },
+    });
+  }
+
+  async function removeTeam(team) {
+    if (!confirm(`Delete the team "${team.name}"?`)) return;
+    try {
+      await api('/teams/' + team.id, { method: 'DELETE' });
+      await loadTeams();
+      render();
+      toast('Team deleted.');
+    } catch (e) {
+      toast(e.message);
+    }
+  }
+
+  function teamsView() {
+    const content = state.teams.length
+      ? h(
+          'div',
+          { class: 'table-wrap' },
+          h(
+            'table',
+            { class: 'narrow' },
+            h('thead', null, h('tr', null, ['Team', 'Members', 'Actions'].map((c) => h('th', { scope: 'col' }, c)))),
+            h(
+              'tbody',
+              null,
+              state.teams.map((t) =>
+                h(
+                  'tr',
+                  null,
+                  h('td', null, h('strong', null, t.name)),
+                  h('td', null, plural(t.members, 'member')),
+                  h(
+                    'td',
+                    null,
+                    h(
+                      'div',
+                      { class: 'row-actions' },
+                      h('button', { class: 'link', onclick: () => teamDialog(t) }, 'Rename'),
+                      h('button', { class: 'link danger', onclick: () => removeTeam(t) }, 'Delete')
+                    )
+                  )
+                )
+              )
+            )
+          )
+        )
+      : h('div', { class: 'empty' }, 'No teams yet. Add one, then put people in it from the People tab.');
+
+    return h(
+      'main',
+      { class: 'page' },
+      h(
+        'div',
+        { class: 'page-head' },
+        h('div', null, h('h1', null, 'Teams'), h('p', { class: 'summary' }, 'Admins are not part of any team.')),
+        h('button', { class: 'btn primary', onclick: () => teamDialog() }, 'Add team')
+      ),
+      content
     );
   }
 

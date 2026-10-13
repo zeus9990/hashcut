@@ -8,6 +8,6 @@
     "db:remote": "wrangler d1 execute team-tasks-db --remote --file=schema.sql"
   },
   "devDependencies": {
-    "wrangler": "^4.149.0"
+    "wrangler": "^4.150.0"
   }
 }

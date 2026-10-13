@@ -3,7 +3,9 @@
 A small task manager for your organisation, running entirely on Cloudflare (Workers + D1, free tier is enough).
 
 - Members sign in with a username and password, see their tasks grouped by urgency (Overdue / Today / Next 7 days / Later), and tick tasks done or not done.
-- Admins get **All tasks** (filter by team or person, assign, edit, delete) and **People** (add accounts, set team, reset passwords, deactivate).
+- Admins get **My tasks** (a private to-do list of their own), **All tasks** (filter by team or person, assign, edit, delete), **People** (add accounts, reset passwords, deactivate or delete) and **Teams** (add, rename, delete).
+- Admins do not belong to a team and cannot be assigned tasks.
+- Everyone, including admins, can switch between day and night mode.
 - Assigning a task to several people (or a whole team) creates one task per person, each with its own done status.
 
 ## Deploy (about 10 minutes)
@@ -31,6 +33,12 @@ Open the URL Wrangler prints (`https://team-tasks.<your-subdomain>.workers.dev`)
 
 You can attach your own domain under Workers & Pages > team-tasks > Settings > Domains & Routes.
 
+## Updating an existing deployment
+
+If you deployed an earlier version, push the new code, then run `migrations/002_teams.sql` once in the D1 console
+(Storage & Databases > D1 > team-tasks-db > Console). It creates the Teams list from your existing users and clears
+the team on admin accounts.
+
 ## Run locally
 
 ```bash
@@ -41,7 +49,7 @@ npm run dev
 
 ## Customise
 
-- Organisation name and suggested team names: top of `public/app.js` (`ORG`, `DEFAULT_TEAMS`).
+- Organisation name: top of `public/app.js` (`ORG`). Team names are managed in the app under **Teams**.
 - Colours and fonts: `public/style.css` (variables at the top).
 - Session length and login rate limit: top of `src/worker.js`.
 

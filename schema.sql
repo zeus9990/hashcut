@@ -35,3 +35,10 @@ CREATE TABLE IF NOT EXISTS login_attempts (
   count    INTEGER NOT NULL,
   first_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS teams (
+  id   INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE COLLATE NOCASE
+);
+INSERT OR IGNORE INTO teams (name) VALUES ('Social Media'), ('Production'), ('BD');
+INSERT OR IGNORE INTO teams (name) SELECT DISTINCT team FROM users WHERE team != '';
