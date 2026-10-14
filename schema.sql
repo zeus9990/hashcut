@@ -3,6 +3,7 @@ CREATE TABLE IF NOT EXISTS users (
   username      TEXT NOT NULL UNIQUE,
   name          TEXT NOT NULL,
   team          TEXT NOT NULL DEFAULT '',
+  phone         TEXT NOT NULL DEFAULT '',
   role          TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('admin', 'member')),
   password_hash TEXT NOT NULL,
   salt          TEXT NOT NULL,
@@ -24,7 +25,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   assignee_id  INTEGER NOT NULL REFERENCES users(id),
   assigned_by  INTEGER REFERENCES users(id),
   deadline     TEXT,
-  status       TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'done')),
+  status       TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'in_progress', 'done')),
   completed_at INTEGER,
   created_at   INTEGER NOT NULL
 );

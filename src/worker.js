@@ -101,6 +101,15 @@ function parseDeadline(value) {
   return { ok: true, value: d.toISOString() };
 }
 
+// WhatsApp numbers are stored as digits only, country code included (e.g. 919876543210).
+function parsePhone(value) {
+  const raw = String(value ?? '').trim();
+  if (!raw) return { ok: true, value: '' };
+  const digits = raw.replace(/\D/g, '');
+  if (digits.length < 8 || digits.length > 15) return { ok: false };
+  return { ok: true, value: digits };
+}
+
 /* ---------- auth routes ---------- */
 
 async function me(env, user) {
@@ -293,7 +302,7 @@ async function updateTask(request, env, user, id) {
   // Status: the assignee, or an admin for member tasks.
   if (request.method === 'PATCH') {
     if (!perm.canTick) return fail(403, 'This task is not assigned to you.');
-    if (!['pending', 'done'].includes(body.status)) return fail(400, 'Invalid status.');
+    if (!['pending', 'in_progress', 'done'].includes(body.status)) return fail(400, 'Invalid status.');
     const completedAt = body.status === 'done' ? Date.now() : null;
     await env.DB.prepare('UPDATE tasks SET status = ?, completed_at = ? WHERE id = ?')
       .bind(body.status, completedAt, id)
@@ -390,8 +399,9 @@ async function deleteTeam(env, id) {
 
 async function listUsers(env) {
   const { results } = await env.DB.prepare(
-    `SELECT u.id, u.username, u.name, u.team, u.role, u.active,
-            (SELECT COUNT(*) FROM tasks t WHERE t.assignee_id = u.id AND t.status = 'pending') AS open_tasks
+    `SELECT u.id, u.username, u.name, u.team, u.role, u.active, u.phone,
+            (SELECT COUNT(*) FROM tasks t WHERE t.assignee_id = u.id AND t.status = 'pending') AS todo_tasks,
+            (SELECT COUNT(*) FROM tasks t WHERE t.assignee_id = u.id AND t.status = 'in_progress') AS progress_tasks
        FROM users u
       ORDER BY u.role DESC, u.active DESC, u.team, u.name`
   ).all();
@@ -405,9 +415,11 @@ async function createUser(request, env) {
   const role = body.role === 'admin' ? 'admin' : 'member';
   const password = String(body.password || '');
   let team = role === 'admin' ? '' : clean(body.team, 40);
+  const ph = role === 'admin' ? { ok: true, value: '' } : parsePhone(body.phone);
 
   if (!/^[a-z0-9._-]{3,32}$/.test(username)) return fail(400, 'Username must be 3–32 characters: letters, numbers, dot, dash or underscore.');
   if (!name) return fail(400, 'Enter a name.');
+  if (!ph.ok) return fail(400, 'Enter the WhatsApp number with its country code (8–15 digits).');
   if (password.length < 8) return fail(400, 'Password must be at least 8 characters.');
 
   if (team) {
@@ -421,10 +433,10 @@ async function createUser(request, env) {
 
   const { hash, salt } = await hashPassword(password);
   await env.DB.prepare(
-    `INSERT INTO users (username, name, team, role, password_hash, salt, active, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, 1, ?)`
+    `INSERT INTO users (username, name, team, role, phone, password_hash, salt, active, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)`
   )
-    .bind(username, name, team, role, hash, salt, Date.now())
+    .bind(username, name, team, role, ph.value, hash, salt, Date.now())
     .run();
   return json({ ok: true }, 201);
 }
@@ -441,6 +453,15 @@ async function updateUser(request, env, admin, id) {
 
   if (target.id === admin.id && (role !== 'admin' || !active)) {
     return fail(400, 'You cannot remove your own admin access or deactivate yourself.');
+  }
+
+  let phone = target.phone || '';
+  if (role === 'admin') {
+    phone = '';
+  } else if (body.phone !== undefined) {
+    const ph = parsePhone(body.phone);
+    if (!ph.ok) return fail(400, 'Enter the WhatsApp number with its country code (8–15 digits).');
+    phone = ph.value;
   }
 
   let team = body.team !== undefined ? clean(body.team, 40) : target.team;
@@ -461,8 +482,8 @@ async function updateUser(request, env, admin, id) {
   }
 
   const statements = [
-    env.DB.prepare('UPDATE users SET name = ?, team = ?, role = ?, active = ?, password_hash = ?, salt = ? WHERE id = ?').bind(
-      name, team, role, active, hash, salt, id
+    env.DB.prepare('UPDATE users SET name = ?, team = ?, role = ?, phone = ?, active = ?, password_hash = ?, salt = ? WHERE id = ?').bind(
+      name, team, role, phone, active, hash, salt, id
     ),
   ];
   if (resetPassword || !active) {

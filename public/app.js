@@ -9,16 +9,23 @@
     loading: true,
     needsSetup: false,
     user: null,
-    view: 'mine', // mine | all | people
+    view: 'mine', // mine | all | people | teams
     tasks: [],
     users: [],
     teams: [],
-    status: 'open', // open | done
+    status: 'pending', // pending | in_progress | done (which list is showing)
     person: 'all',
     team: 'all',
   };
 
-  /* ---------- helpers ---------- */
+  const STATUSES = [
+    ['pending', 'To do'],
+    ['in_progress', 'In progress'],
+    ['done', 'Done'],
+  ];
+  const STATUS_LABEL = Object.fromEntries(STATUSES);
+
+  /* ---------- tiny DOM helpers ---------- */
 
   function h(tag, attrs, ...kids) {
     const el = document.createElement(tag);
@@ -38,6 +45,33 @@
     if (deferredValue !== undefined) el.value = deferredValue;
     return el;
   }
+
+  // Static, hard-coded SVG paths only (never user data).
+  const ICONS = {
+    sun: '<circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>',
+    moon: '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>',
+    chat: '<path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/>',
+    plus: '<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>',
+    clock: '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
+    tasks: '<polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>',
+    layers: '<polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/>',
+    users: '<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
+    tag: '<path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/>',
+    check: '<polyline points="20 6 9 17 4 12"/>',
+  };
+
+  function icon(name, size = 18) {
+    const el = document.createElement('span');
+    el.className = 'ico';
+    el.setAttribute('aria-hidden', 'true');
+    el.innerHTML = `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ICONS[name]}</svg>`;
+    return el;
+  }
+
+  const logoMark = () => h('div', { class: 'logo' }, icon('check', 20));
+  const initials = (name) =>
+    name.trim().split(/\s+/).slice(0, 2).map((w) => w[0] || '').join('').toUpperCase() || '?';
+  const avatar = (name) => h('span', { class: 'avatar', 'aria-hidden': 'true' }, initials(name));
 
   async function api(path, { method = 'GET', body } = {}) {
     const res = await fetch('/api' + path, {
@@ -64,38 +98,37 @@
     setTimeout(() => el.remove(), 3200);
   }
 
+  /* ---------- dates ---------- */
+
   const pad = (n) => String(n).padStart(2, '0');
   const toLocalInput = (iso) => {
     const d = new Date(iso);
     return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
   };
   const fmtDate = (d) => d.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' });
+  const fmtShort = (d) => d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
   const fmtTime = (d) => d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
   const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
-  // Works out how a task's deadline should be shown and which urgency group it belongs to.
+  // How a task's deadline is shown, and which urgency group it falls in.
   function dueInfo(task) {
     if (task.status === 'done') {
-      const when = task.completed_at ? fmtDate(new Date(task.completed_at)) : '';
-      return { group: 'done', tone: 'done', date: 'Done', rel: when };
+      return { group: 'done', tone: 'done', when: '', rel: task.completed_at ? `Done ${fmtShort(new Date(task.completed_at))}` : 'Done' };
     }
-    if (!task.deadline) return { group: 'none', tone: 'none', date: 'No deadline', rel: '' };
+    if (!task.deadline) return { group: 'none', tone: 'none', when: 'No deadline', rel: '' };
 
     const due = new Date(task.deadline);
     const now = new Date();
     const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     const startDue = new Date(due.getFullYear(), due.getMonth(), due.getDate());
     const days = Math.round((startDue - startToday) / DAY);
-    const date = `${fmtDate(due)}, ${fmtTime(due)}`;
+    const when = `${fmtDate(due)}, ${fmtTime(due)}`;
 
-    if (due < now) {
-      const late = days < 0 ? `${plural(-days, 'day')} overdue` : 'Overdue today';
-      return { group: 'overdue', tone: 'late', date, rel: late };
-    }
-    if (days === 0) return { group: 'today', tone: 'today', date, rel: 'Due today' };
-    if (days === 1) return { group: 'week', tone: 'soon', date, rel: 'Due tomorrow' };
-    if (days <= 7) return { group: 'week', tone: 'soon', date, rel: `In ${days} days` };
-    return { group: 'later', tone: 'none', date, rel: `In ${days} days` };
+    if (due < now) return { group: 'overdue', tone: 'late', when, rel: days < 0 ? `${plural(-days, 'day')} overdue` : 'Overdue today' };
+    if (days === 0) return { group: 'today', tone: 'today', when, rel: 'Due today' };
+    if (days === 1) return { group: 'week', tone: 'soon', when, rel: 'Due tomorrow' };
+    if (days <= 7) return { group: 'week', tone: 'soon', when, rel: `In ${days} days` };
+    return { group: 'later', tone: 'none', when, rel: `In ${days} days` };
   }
 
   const GROUPS = [
@@ -106,26 +139,66 @@
     ['none', 'No deadline'],
   ];
 
+  /* ---------- WhatsApp (click-to-send via the admin's own WhatsApp) ---------- */
+
+  function waText(person, task, kind) {
+    const first = person.name.trim().split(/\s+/)[0];
+    const lead =
+      kind === 'new'
+        ? `Hi ${first}, you have a new task: *${task.title}*.`
+        : `Hi ${first}, a quick reminder about your task: *${task.title}*.`;
+    let due = '';
+    if (task.deadline) {
+      const d = new Date(task.deadline);
+      due = ` Due: ${fmtDate(d)}, ${fmtTime(d)}.`;
+    }
+    const note = task.description ? `\n${task.description.slice(0, 300)}` : '';
+    return `${lead}${due}${note}\nOpen your tasks: ${location.origin}`;
+  }
+
+  function waButton(person, task, kind) {
+    if (!person || !person.phone) {
+      return h('span', { class: 'btn-wa off', title: 'Add a WhatsApp number under People → Edit' }, icon('chat', 15), 'No number');
+    }
+    return h(
+      'a',
+      {
+        class: 'btn-wa',
+        href: `https://wa.me/${person.phone}?text=${encodeURIComponent(waText(person, task, kind))}`,
+        target: '_blank',
+        rel: 'noopener noreferrer',
+        'aria-label': `Send ${person.name} a WhatsApp message about ${task.title}`,
+      },
+      icon('chat', 15),
+      'WhatsApp'
+    );
+  }
+
   /* ---------- night mode ---------- */
 
   const currentTheme = () => (document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light');
-  const themeLabel = () => (currentTheme() === 'dark' ? 'Day mode' : 'Night mode');
+
+  function paintThemeButton(btn) {
+    const dark = currentTheme() === 'dark';
+    btn.replaceChildren(icon(dark ? 'sun' : 'moon', 20));
+    const label = dark ? 'Switch to day mode' : 'Switch to night mode';
+    btn.setAttribute('aria-label', label);
+    btn.title = label;
+  }
 
   function themeButton(extra = '') {
-    return h(
-      'button',
-      {
-        class: 'link theme-toggle ' + extra,
-        type: 'button',
-        onclick: () => {
-          const next = currentTheme() === 'dark' ? 'light' : 'dark';
-          document.documentElement.setAttribute('data-theme', next);
-          try { localStorage.setItem('theme', next); } catch { /* storage unavailable */ }
-          document.querySelectorAll('.theme-toggle').forEach((b) => (b.textContent = themeLabel()));
-        },
+    const btn = h('button', {
+      class: 'icon-btn theme-toggle ' + extra,
+      type: 'button',
+      onclick: () => {
+        const next = currentTheme() === 'dark' ? 'light' : 'dark';
+        document.documentElement.setAttribute('data-theme', next);
+        try { localStorage.setItem('theme', next); } catch { /* storage unavailable */ }
+        document.querySelectorAll('.theme-toggle').forEach(paintThemeButton);
       },
-      themeLabel()
-    );
+    });
+    paintThemeButton(btn);
+    return btn;
   }
 
   /* ---------- data loading ---------- */
@@ -134,18 +207,12 @@
     const path = state.user.role === 'admin' && state.view === 'all' ? '/tasks' : '/tasks?mine=1';
     state.tasks = (await api(path)).tasks;
   }
-
-  async function loadUsers() {
-    state.users = (await api('/users')).users;
-  }
-
-  async function loadTeams() {
-    state.teams = (await api('/teams')).teams;
-  }
+  async function loadUsers() { state.users = (await api('/users')).users; }
+  async function loadTeams() { state.teams = (await api('/teams')).teams; }
 
   async function enter() {
     state.view = 'mine';
-    state.status = 'open';
+    state.status = 'pending';
     state.person = 'all';
     state.team = 'all';
     await loadTasks();
@@ -167,9 +234,10 @@
       toast(e.message);
     }
     render();
+    window.scrollTo({ top: 0 });
   }
 
-  /* ---------- screens ---------- */
+  /* ---------- sign-in screens ---------- */
 
   function field(label, name, type = 'text', attrs = {}, hint) {
     return h('label', { class: 'field' }, h('span', null, label), h('input', { name, type, ...attrs }), hint ? h('small', null, hint) : null);
@@ -194,6 +262,7 @@
           }
         },
       },
+      logoMark(),
       h('h1', null, ORG),
       h('p', { class: 'sub' }, 'Sign in to see your tasks.'),
       field('Username', 'username', 'text', { autocomplete: 'username', required: true, autocapitalize: 'none' }),
@@ -227,6 +296,7 @@
           }
         },
       },
+      logoMark(),
       h('h1', null, 'Create the first admin'),
       h('p', { class: 'sub' }, 'This only works once, while no accounts exist.'),
       field('Setup key', 'key', 'password', { required: true, autocomplete: 'off' }, 'The SETUP_KEY secret you set on Cloudflare.'),
@@ -239,167 +309,226 @@
     return h('main', { class: 'auth' }, themeButton('floating'), form);
   }
 
-  function shell() {
+  /* ---------- shell: header, account menu, navigation ---------- */
+
+  function closeMenus() {
+    document.querySelectorAll('.menu').forEach((m) => { m.hidden = true; });
+    document.querySelectorAll('.avatar-btn').forEach((b) => b.setAttribute('aria-expanded', 'false'));
+  }
+
+  function accountMenu() {
     const u = state.user;
-    const admin = u.role === 'admin';
-    const tabs = [['mine', 'My tasks']];
-    if (admin) tabs.push(['all', 'All tasks'], ['people', 'People'], ['teams', 'Teams']);
+    const sub = u.role === 'admin' ? 'Admin' : u.team || 'Member';
+    const menu = h(
+      'div',
+      { class: 'menu', hidden: true },
+      h('div', { class: 'menu-who' }, h('strong', null, u.name), h('span', null, `@${u.username} · ${sub}`)),
+      h('button', { class: 'menu-item', type: 'button', onclick: () => { closeMenus(); passwordDialog(); } }, 'Change password'),
+      h('button', { class: 'menu-item', type: 'button', onclick: logout }, 'Sign out')
+    );
+    const btn = h(
+      'button',
+      {
+        class: 'avatar-btn',
+        type: 'button',
+        'aria-label': 'Account menu',
+        'aria-haspopup': 'true',
+        'aria-expanded': 'false',
+        onclick: (e) => {
+          e.stopPropagation();
+          const opening = menu.hidden;
+          closeMenus();
+          if (opening) {
+            menu.hidden = false;
+            btn.setAttribute('aria-expanded', 'true');
+          }
+        },
+      },
+      initials(u.name)
+    );
+    return h('div', { class: 'account' }, btn, menu);
+  }
+
+  function shell() {
+    const admin = state.user.role === 'admin';
+    const tabs = [['mine', 'My tasks', 'tasks']];
+    if (admin) tabs.push(['all', 'All tasks', 'layers'], ['people', 'People', 'users'], ['teams', 'Teams', 'tag']);
+
+    const nav = admin
+      ? h(
+          'nav',
+          { class: 'tabs', 'aria-label': 'Sections' },
+          tabs.map(([key, label, ic]) =>
+            h(
+              'button',
+              { class: 'tab' + (state.view === key ? ' on' : ''), type: 'button', 'aria-current': state.view === key ? 'page' : null, onclick: () => go(key) },
+              icon(ic, 20),
+              h('span', null, label)
+            )
+          )
+        )
+      : null;
 
     const header = h(
       'header',
       { class: 'top' },
-      h('div', { class: 'brand' }, ORG),
-      h(
-        'nav',
-        { class: 'tabs', 'aria-label': 'Sections' },
-        tabs.map(([key, label]) =>
-          h('button', { class: 'tab' + (state.view === key ? ' on' : ''), 'aria-current': state.view === key ? 'page' : null, onclick: () => go(key) }, label)
-        )
-      ),
-      h(
-        'div',
-        { class: 'who' },
-        h('span', null, u.name),
-        themeButton(),
-        h('button', { class: 'link', onclick: passwordDialog }, 'Change password'),
-        h('button', { class: 'link', onclick: logout }, 'Sign out')
-      )
+      h('div', { class: 'brand' }, logoMark(), h('span', null, ORG)),
+      nav,
+      h('div', { class: 'top-right' }, themeButton(), accountMenu())
     );
+
     const page = state.view === 'people' ? peopleView() : state.view === 'teams' ? teamsView() : taskView(state.view === 'all');
+    if (admin) page.classList.add('has-nav');
     return h('div', null, header, page);
   }
 
-  /* ---------- tasks view ---------- */
+  /* ---------- tasks ---------- */
+
+  function statCard(key, label, count) {
+    return h(
+      'button',
+      {
+        type: 'button',
+        class: `stat s-${key}` + (state.status === key ? ' on' : ''),
+        'aria-pressed': String(state.status === key),
+        onclick: () => { state.status = key; render(); },
+      },
+      h('span', { class: 'stat-n' }, count),
+      h('span', { class: 'stat-l' }, label)
+    );
+  }
 
   function taskView(all) {
-    const manage = all || state.user.role === 'admin';
+    const isAdmin = state.user.role === 'admin';
+    const manage = all || isAdmin;
+
     let tasks = state.tasks.slice();
     if (all) {
       if (state.person !== 'all') tasks = tasks.filter((t) => String(t.assignee_id) === state.person);
       if (state.team !== 'all') tasks = tasks.filter((t) => t.assignee_team === state.team);
     }
-    const open = tasks.filter((t) => t.status === 'pending');
+    const todo = tasks.filter((t) => t.status === 'pending');
+    const prog = tasks.filter((t) => t.status === 'in_progress');
     const done = tasks.filter((t) => t.status === 'done').sort((a, b) => (b.completed_at || 0) - (a.completed_at || 0));
-    const overdue = open.filter((t) => dueInfo(t).group === 'overdue').length;
+    const overdue = [...todo, ...prog].filter((t) => dueInfo(t).group === 'overdue').length;
 
-    const title = all ? 'All tasks' : `Hi, ${state.user.name.split(' ')[0]}`;
     const head = h(
       'div',
       { class: 'page-head' },
       h(
         'div',
         null,
-        h('h1', null, title),
-        h('p', { class: 'summary' }, plural(open.length, 'open task'), overdue ? [', ', h('span', { class: 'late' }, `${overdue} overdue`)] : null)
+        h('h1', null, all ? 'All tasks' : `Hi, ${state.user.name.trim().split(/\s+/)[0]}`),
+        h('p', { class: 'summary' }, `${todo.length} to do · ${prog.length} in progress`, overdue ? [' · ', h('span', { class: 'late' }, `${overdue} overdue`)] : null)
       ),
       all
-        ? h('button', { class: 'btn primary', onclick: () => taskDialog() }, 'Assign task')
-        : state.user.role === 'admin'
-        ? h('button', { class: 'btn primary', onclick: () => taskDialog() }, 'Add my task')
+        ? h('button', { class: 'btn primary', type: 'button', onclick: () => taskDialog() }, icon('plus', 18), 'Assign task')
+        : isAdmin
+        ? h('button', { class: 'btn primary', type: 'button', onclick: () => taskDialog() }, icon('plus', 18), 'Add my task')
         : null
     );
 
-    const seg = h(
-      'div',
-      { class: 'seg', role: 'group', 'aria-label': 'Task status' },
-      h('button', { class: state.status === 'open' ? 'on' : '', onclick: () => { state.status = 'open'; render(); } }, `Open (${open.length})`),
-      h('button', { class: state.status === 'done' ? 'on' : '', onclick: () => { state.status = 'done'; render(); } }, `Done (${done.length})`)
-    );
+    const stats = h('div', { class: 'stats', role: 'group', 'aria-label': 'Filter by status' }, statCard('pending', 'To do', todo.length), statCard('in_progress', 'In progress', prog.length), statCard('done', 'Done', done.length));
 
-    const toolbar = h('div', { class: 'toolbar' }, seg);
+    const parts = [head, stats];
     if (all) {
-      const teams = state.teams.map((t) => t.name);
       const people = state.users.filter((u) => u.role === 'member');
-      toolbar.append(
+      parts.push(
         h(
-          'select',
-          { 'aria-label': 'Filter by team', value: state.team, onchange: (e) => { state.team = e.target.value; render(); } },
-          h('option', { value: 'all' }, 'All teams'),
-          teams.map((t) => h('option', { value: t }, t))
-        ),
-        h(
-          'select',
-          { 'aria-label': 'Filter by person', value: state.person, onchange: (e) => { state.person = e.target.value; render(); } },
-          h('option', { value: 'all' }, 'Everyone'),
-          people.map((p) => h('option', { value: String(p.id) }, p.name + (p.active ? '' : ' (inactive)')))
+          'div',
+          { class: 'toolbar' },
+          h(
+            'select',
+            { 'aria-label': 'Filter by team', value: state.team, onchange: (e) => { state.team = e.target.value; render(); } },
+            h('option', { value: 'all' }, 'All teams'),
+            state.teams.map((t) => h('option', { value: t.name }, t.name))
+          ),
+          h(
+            'select',
+            { 'aria-label': 'Filter by person', value: state.person, onchange: (e) => { state.person = e.target.value; render(); } },
+            h('option', { value: 'all' }, 'Everyone'),
+            people.map((p) => h('option', { value: String(p.id) }, p.name + (p.active ? '' : ' (inactive)')))
+          )
         )
       );
     }
 
-    const content = h('div', null);
-    if (state.status === 'open') {
-      if (!open.length) {
-        content.append(h('div', { class: 'empty' }, all
-            ? 'No open tasks match these filters.'
-            : state.user.role === 'admin'
-            ? 'Nothing on your list. Use "Add my task" to note something down.'
-            : 'Nothing on your list. New tasks will show up here.'));
-      }
+    const list = state.status === 'done' ? done : state.status === 'in_progress' ? prog : todo;
+    if (!list.length) {
+      const msg = {
+        pending: all ? 'No to-do tasks match these filters.' : isAdmin ? 'Nothing on your list. Use "Add my task" to note something down.' : 'Nothing on your to-do list. New tasks will show up here.',
+        in_progress: all ? 'Nobody has a task in progress right now.' : 'Nothing in progress. Move a task here when you start working on it.',
+        done: 'No completed tasks yet.',
+      }[state.status];
+      parts.push(h('div', { class: 'empty' }, msg));
+    } else if (state.status === 'done') {
+      parts.push(h('ul', { class: 'tasks' }, list.map((t) => taskCard(t, all, manage))));
+    } else {
       for (const [key, label] of GROUPS) {
-        const items = open.filter((t) => dueInfo(t).group === key);
+        const items = list.filter((t) => dueInfo(t).group === key);
         if (!items.length) continue;
-        content.append(
+        parts.push(
           h(
             'section',
             { class: 'group g-' + key },
             h('h2', null, label, h('span', { class: 'count' }, items.length)),
-            h('ul', { class: 'tasks' }, items.map((t) => taskRow(t, all, manage)))
+            h('ul', { class: 'tasks' }, items.map((t) => taskCard(t, all, manage)))
           )
         );
       }
-    } else if (!done.length) {
-      content.append(h('div', { class: 'empty' }, 'No completed tasks yet.'));
-    } else {
-      content.append(h('ul', { class: 'tasks' }, done.map((t) => taskRow(t, all, manage))));
+    }
+    return h('main', { class: 'page' }, parts);
+  }
+
+  function statusControl(t) {
+    return h(
+      'div',
+      { class: 'status-seg', role: 'group', 'aria-label': `Status of ${t.title}` },
+      STATUSES.map(([key, label]) =>
+        h('button', { type: 'button', class: `st st-${key}` + (t.status === key ? ' on' : ''), 'aria-pressed': String(t.status === key), onclick: () => setStatus(t, key) }, label)
+      )
+    );
+  }
+
+  function taskCard(t, all, manage) {
+    const d = dueInfo(t);
+    const person = all ? state.users.find((u) => u.id === t.assignee_id) : null;
+
+    const dueChip =
+      t.status === 'done'
+        ? h('span', { class: 'chip done' }, icon('check', 14), d.rel)
+        : h('span', { class: 'chip ' + d.tone }, icon('clock', 14), d.when, d.rel ? ` · ${d.rel}` : '');
+
+    const chips = h(
+      'div',
+      { class: 'chips' },
+      dueChip,
+      all ? h('span', { class: 'chip person' }, avatar(t.assignee_name), t.assignee_name + (t.assignee_team ? ` · ${t.assignee_team}` : '')) : null
+    );
+
+    const actions = [];
+    if (all && t.status !== 'done') actions.push(waButton(person, t, 'reminder'));
+    if (manage) {
+      actions.push(h('button', { class: 'link', type: 'button', onclick: () => taskDialog(t) }, 'Edit'));
+      actions.push(h('button', { class: 'link danger', type: 'button', onclick: () => removeTask(t) }, 'Delete'));
     }
 
-    return h('main', { class: 'page' }, head, toolbar, content);
-  }
-
-  function taskRow(t, all, manage) {
-    const d = dueInfo(t);
-    const done = t.status === 'done';
-    const check = h(
-      'button',
-      {
-        class: 'check' + (done ? ' on' : ''),
-        role: 'checkbox',
-        'aria-checked': String(done),
-        'aria-label': (done ? 'Mark as not done: ' : 'Mark as done: ') + t.title,
-        onclick: () => toggle(t),
-      },
-      done ? '✓' : ''
-    );
     return h(
       'li',
-      { class: 'task tone-' + d.tone + (done ? ' done' : '') },
-      h('div', { class: 'due' }, h('span', { class: 'due-date' }, d.date), h('span', { class: 'due-rel' }, d.rel)),
-      check,
-      h(
-        'div',
-        { class: 'body' },
-        h('p', { class: 'title' }, t.title),
-        t.description ? h('p', { class: 'desc' }, t.description) : null,
-        all ? h('p', { class: 'meta' }, t.assignee_name + (t.assignee_team ? ` · ${t.assignee_team}` : '')) : null
-      ),
-      manage
-        ? h(
-            'div',
-            { class: 'actions' },
-            h('button', { class: 'link', onclick: () => taskDialog(t) }, 'Edit'),
-            h('button', { class: 'link danger', onclick: () => removeTask(t) }, 'Delete')
-          )
-        : null
+      { class: `task is-${t.status} tone-${d.tone}` },
+      h('div', { class: 'task-main' }, h('p', { class: 'title' }, t.title), t.description ? h('p', { class: 'desc' }, t.description) : null, chips),
+      h('div', { class: 'task-side' }, statusControl(t), actions.length ? h('div', { class: 'actions' }, actions) : null)
     );
   }
 
-  async function toggle(t) {
-    const next = t.status === 'done' ? 'pending' : 'done';
+  async function setStatus(t, status) {
+    if (t.status === status) return;
     try {
-      const r = await api('/tasks/' + t.id, { method: 'PATCH', body: { status: next } });
+      const r = await api('/tasks/' + t.id, { method: 'PATCH', body: { status } });
       t.status = r.task.status;
       t.completed_at = r.task.completed_at;
       render();
+      toast(`Moved to ${STATUS_LABEL[status]}`);
     } catch (e) {
       toast(e.message);
     }
@@ -429,8 +558,9 @@
         err.textContent = '';
         btn.disabled = true;
         try {
-          await onSubmit(new FormData(form));
+          const after = await onSubmit(new FormData(form));
           dlg.close();
+          if (typeof after === 'function') after();
         } catch (ex) {
           err.textContent = ex.message;
           btn.disabled = false;
@@ -447,6 +577,46 @@
     dlg.addEventListener('close', () => dlg.remove());
     document.body.append(dlg);
     dlg.showModal();
+  }
+
+  function infoDialog({ title, intro, body, closeLabel = 'Close' }) {
+    const dlg = h('dialog', { class: 'dlg' });
+    dlg.append(
+      h(
+        'div',
+        { class: 'dlg-body' },
+        h('h2', null, title),
+        intro ? h('p', { class: 'hint' }, intro) : null,
+        body,
+        h('div', { class: 'dlg-actions' }, h('button', { class: 'btn primary', type: 'button', onclick: () => dlg.close() }, closeLabel))
+      )
+    );
+    dlg.addEventListener('close', () => dlg.remove());
+    document.body.append(dlg);
+    dlg.showModal();
+  }
+
+  // Shown right after assigning: one WhatsApp button per person.
+  function notifyDialog(ids, task) {
+    const people = ids.map((id) => state.users.find((u) => u.id === id)).filter(Boolean);
+    const missing = people.some((p) => !p.phone);
+    infoDialog({
+      title: 'Task assigned',
+      intro: 'Tell them on WhatsApp so they see it right away. WhatsApp opens with the message ready, and you just press send.',
+      body: h(
+        'div',
+        null,
+        h(
+          'ul',
+          { class: 'notify-list' },
+          people.map((p) =>
+            h('li', null, avatar(p.name), h('div', { class: 'grow' }, h('strong', null, p.name), h('small', null, p.team || 'No team')), waButton(p, task, 'new'))
+          )
+        ),
+        missing ? h('p', { class: 'hint' }, 'Add missing numbers under People → Edit.') : null
+      ),
+      closeLabel: 'Done',
+    });
   }
 
   function taskDialog(task) {
@@ -474,9 +644,7 @@
           byTeam.get(key).push(u);
         }
         const groups = [...byTeam.entries()].map(([team, list]) => {
-          const boxes = list.map((u) =>
-            h('label', { class: 'check-row' }, h('input', { type: 'checkbox', name: 'assignee', value: String(u.id) }), u.name)
-          );
+          const boxes = list.map((u) => h('label', { class: 'check-row' }, h('input', { type: 'checkbox', name: 'assignee', value: String(u.id) }), u.name));
           const toggleAll = h(
             'button',
             {
@@ -518,6 +686,7 @@
           description: fd.get('description'),
           deadline: deadline ? new Date(deadline).toISOString() : null,
         };
+        let after = null;
         if (personal) {
           if (editing) await api('/tasks/' + task.id, { method: 'PUT', body });
           else await api('/tasks/mine', { method: 'POST', body });
@@ -528,11 +697,15 @@
           body.assignee_ids = fd.getAll('assignee').map(Number);
           if (!body.assignee_ids.length) throw new Error('Pick at least one person.');
           await api('/tasks', { method: 'POST', body });
+          const ids = body.assignee_ids;
+          const info = { title: body.title, description: body.description, deadline: body.deadline };
+          after = () => notifyDialog(ids, info);
         }
         await loadTasks();
         if (state.view === 'all') await loadUsers();
         render();
         toast(editing ? 'Task updated.' : personal ? 'Task added.' : 'Task assigned.');
+        return after;
       },
     });
   }
@@ -541,7 +714,7 @@
     const editing = !!person;
     const startRole = person ? person.role : 'member';
 
-    // Admins do not belong to a team, so the Team field is hidden while Access is "Admin".
+    // Admins have no team and are never assigned tasks, so these fields hide for them.
     const teamField = h(
       'label',
       { class: 'field', hidden: startRole === 'admin' },
@@ -553,6 +726,13 @@
         state.teams.map((t) => h('option', { value: t.name }, t.name))
       ),
       state.teams.length ? null : h('small', null, 'No teams yet. Add some under the Teams tab.')
+    );
+    const phoneField = h(
+      'label',
+      { class: 'field', hidden: startRole === 'admin' },
+      h('span', null, 'WhatsApp number (optional)'),
+      h('input', { type: 'tel', name: 'phone', inputmode: 'tel', autocomplete: 'off', placeholder: '+91 98765 43210', value: person && person.phone ? '+' + person.phone : '' }),
+      h('small', null, 'Include the country code. Used for the WhatsApp message button.')
     );
 
     formDialog({
@@ -569,12 +749,21 @@
           h('span', null, 'Access'),
           h(
             'select',
-            { name: 'role', value: startRole, onchange: (e) => { teamField.hidden = e.target.value === 'admin'; } },
+            {
+              name: 'role',
+              value: startRole,
+              onchange: (e) => {
+                const isAdmin = e.target.value === 'admin';
+                teamField.hidden = isAdmin;
+                phoneField.hidden = isAdmin;
+              },
+            },
             h('option', { value: 'member' }, 'Member – sees own tasks'),
             h('option', { value: 'admin' }, 'Admin – manages everyone')
           )
         ),
         teamField,
+        phoneField,
         h(
           'label',
           { class: 'field' },
@@ -586,15 +775,15 @@
       onSubmit: async (fd) => {
         const role = fd.get('role');
         const team = role === 'admin' ? '' : fd.get('team');
+        const phone = role === 'admin' ? '' : fd.get('phone');
         if (editing) {
-          const body = { name: fd.get('name'), team, role };
+          const body = { name: fd.get('name'), team, role, phone };
           if (fd.get('password')) body.password = fd.get('password');
           await api('/users/' + person.id, { method: 'PATCH', body });
         } else {
-          await api('/users', { method: 'POST', body: { username: fd.get('username'), name: fd.get('name'), team, role, password: fd.get('password') } });
+          await api('/users', { method: 'POST', body: { username: fd.get('username'), name: fd.get('name'), team, role, phone, password: fd.get('password') } });
         }
-        await loadUsers();
-        await loadTeams();
+        await Promise.all([loadUsers(), loadTeams()]);
         render();
         toast(editing ? 'Changes saved.' : 'Person added.');
       },
@@ -616,13 +805,10 @@
     });
   }
 
-  /* ---------- people view ---------- */
+  /* ---------- people ---------- */
 
   async function setActive(u, active) {
-    const message = active
-      ? null
-      : `Deactivate ${u.name}? They will be signed out and cannot sign in until you reactivate them. Their tasks are kept.`;
-    if (message && !confirm(message)) return;
+    if (!active && !confirm(`Deactivate ${u.name}? They will be signed out and cannot sign in until you reactivate them. Their tasks are kept.`)) return;
     try {
       await api('/users/' + u.id, { method: 'PATCH', body: { active } });
       await loadUsers();
@@ -649,26 +835,42 @@
   }
 
   function peopleView() {
-    const rows = state.users.map((u) => {
+    const cards = state.users.map((u) => {
       const self = u.id === state.user.id;
+      const workload = !u.active
+        ? 'Deactivated'
+        : u.role === 'admin'
+        ? 'Manages everyone'
+        : u.todo_tasks || u.progress_tasks
+        ? `${u.todo_tasks} to do · ${u.progress_tasks} in progress`
+        : 'No open tasks';
       return h(
-        'tr',
-        { class: u.active ? '' : 'off' },
-        h('td', null, h('strong', null, u.name), self ? h('span', { class: 'you' }, ' (you)') : null),
-        h('td', null, u.username),
-        h('td', null, u.role === 'admin' ? '–' : u.team || 'No team'),
-        h('td', null, h('span', { class: 'badge' + (u.role === 'admin' ? ' admin' : '') }, u.role === 'admin' ? 'Admin' : 'Member')),
-        h('td', null, u.active ? plural(u.open_tasks, 'open task') : 'Deactivated'),
+        'li',
+        { class: 'card' + (u.active ? '' : ' off') },
         h(
-          'td',
-          null,
-          h(
-            'div',
-            { class: 'row-actions' },
-            h('button', { class: 'link', onclick: () => personDialog(u) }, 'Edit'),
-            self ? null : h('button', { class: 'link', onclick: () => setActive(u, !u.active) }, u.active ? 'Deactivate' : 'Reactivate'),
-            self ? null : h('button', { class: 'link danger', onclick: () => removePerson(u) }, 'Delete')
-          )
+          'div',
+          { class: 'card-top' },
+          avatar(u.name),
+          h('div', null, h('strong', null, u.name, self ? h('span', { class: 'you' }, ' (you)') : null), h('small', null, '@' + u.username))
+        ),
+        h(
+          'div',
+          { class: 'chips' },
+          h('span', { class: 'badge' + (u.role === 'admin' ? ' admin' : '') }, u.role === 'admin' ? 'Admin' : 'Member'),
+          u.role === 'member' ? h('span', { class: 'badge' }, u.team || 'No team') : null
+        ),
+        h(
+          'div',
+          { class: 'meta' },
+          h('span', null, workload),
+          u.role === 'member' ? h('span', null, u.phone ? `WhatsApp: +${u.phone}` : 'No WhatsApp number') : null
+        ),
+        h(
+          'div',
+          { class: 'row-actions' },
+          h('button', { class: 'link', type: 'button', onclick: () => personDialog(u) }, 'Edit'),
+          self ? null : h('button', { class: 'link', type: 'button', onclick: () => setActive(u, !u.active) }, u.active ? 'Deactivate' : 'Reactivate'),
+          self ? null : h('button', { class: 'link danger', type: 'button', onclick: () => removePerson(u) }, 'Delete')
         )
       );
     });
@@ -679,22 +881,13 @@
         'div',
         { class: 'page-head' },
         h('div', null, h('h1', null, 'People'), h('p', { class: 'summary' }, plural(state.users.filter((u) => u.active).length, 'active account'))),
-        h('button', { class: 'btn primary', onclick: () => personDialog() }, 'Add person')
+        h('button', { class: 'btn primary', type: 'button', onclick: () => personDialog() }, icon('plus', 18), 'Add person')
       ),
-      h(
-        'div',
-        { class: 'table-wrap' },
-        h(
-          'table',
-          null,
-          h('thead', null, h('tr', null, ['Name', 'Username', 'Team', 'Access', 'Workload', 'Actions'].map((c) => h('th', { scope: 'col' }, c)))),
-          h('tbody', null, rows)
-        )
-      )
+      h('ul', { class: 'cards' }, cards)
     );
   }
 
-  /* ---------- teams view ---------- */
+  /* ---------- teams ---------- */
 
   function teamDialog(team) {
     const editing = !!team;
@@ -730,32 +923,18 @@
   function teamsView() {
     const content = state.teams.length
       ? h(
-          'div',
-          { class: 'table-wrap' },
-          h(
-            'table',
-            { class: 'narrow' },
-            h('thead', null, h('tr', null, ['Team', 'Members', 'Actions'].map((c) => h('th', { scope: 'col' }, c)))),
+          'ul',
+          { class: 'cards' },
+          state.teams.map((t) =>
             h(
-              'tbody',
-              null,
-              state.teams.map((t) =>
-                h(
-                  'tr',
-                  null,
-                  h('td', null, h('strong', null, t.name)),
-                  h('td', null, plural(t.members, 'member')),
-                  h(
-                    'td',
-                    null,
-                    h(
-                      'div',
-                      { class: 'row-actions' },
-                      h('button', { class: 'link', onclick: () => teamDialog(t) }, 'Rename'),
-                      h('button', { class: 'link danger', onclick: () => removeTeam(t) }, 'Delete')
-                    )
-                  )
-                )
+              'li',
+              { class: 'card' },
+              h('div', { class: 'card-top' }, avatar(t.name), h('div', null, h('strong', null, t.name), h('small', null, plural(t.members, 'member')))),
+              h(
+                'div',
+                { class: 'row-actions' },
+                h('button', { class: 'link', type: 'button', onclick: () => teamDialog(t) }, 'Rename'),
+                h('button', { class: 'link danger', type: 'button', onclick: () => removeTeam(t) }, 'Delete')
               )
             )
           )
@@ -769,7 +948,7 @@
         'div',
         { class: 'page-head' },
         h('div', null, h('h1', null, 'Teams'), h('p', { class: 'summary' }, 'Admins are not part of any team.')),
-        h('button', { class: 'btn primary', onclick: () => teamDialog() }, 'Add team')
+        h('button', { class: 'btn primary', type: 'button', onclick: () => teamDialog() }, icon('plus', 18), 'Add team')
       ),
       content
     );
@@ -782,6 +961,7 @@
     state.user = null;
     state.tasks = [];
     state.users = [];
+    closeMenus();
     render();
   }
 
@@ -794,6 +974,8 @@
   }
 
   async function boot() {
+    document.addEventListener('click', closeMenus);
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeMenus(); });
     try {
       const r = await api('/me');
       state.user = r.user;
@@ -801,7 +983,7 @@
       state.loading = false;
       if (state.user) await enter();
       else render();
-    } catch (e) {
+    } catch {
       state.loading = false;
       root.replaceChildren(h('p', { class: 'boot' }, 'Could not reach the server. Refresh to try again.'));
     }

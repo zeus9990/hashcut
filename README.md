@@ -2,11 +2,11 @@
 
 A small task manager for your organisation, running entirely on Cloudflare (Workers + D1, free tier is enough).
 
-- Members sign in with a username and password, see their tasks grouped by urgency (Overdue / Today / Next 7 days / Later), and tick tasks done or not done.
-- Admins get **My tasks** (a private to-do list of their own), **All tasks** (filter by team or person, assign, edit, delete), **People** (add accounts, reset passwords, deactivate or delete) and **Teams** (add, rename, delete).
+- Members sign in with a username and password and see their own tasks. Each task has three states: **To do**, **In progress** and **Done**, changed with one tap. Tasks are grouped by urgency (Overdue / Today / Next 7 days / Later).
+- Admins get **My tasks** (a private to-do list of their own), **All tasks** (filter by team or person, see who is working on what, assign, edit, delete), **People** (add accounts, WhatsApp numbers, reset passwords, deactivate or delete) and **Teams** (add, rename, delete).
+- After assigning a task, admins get a **WhatsApp** button per person that opens WhatsApp with the message ready to send. Open tasks in All tasks also have a WhatsApp reminder button. It uses your normal WhatsApp, so it is free; you press send yourself.
 - Admins do not belong to a team and cannot be assigned tasks.
-- Everyone, including admins, can switch between day and night mode.
-- Assigning a task to several people (or a whole team) creates one task per person, each with its own done status.
+- Works on phones and desktops (bottom navigation and bottom-sheet dialogs on mobile) with a sun/moon night-mode switch.
 
 ## Deploy (about 10 minutes)
 
@@ -35,9 +35,13 @@ You can attach your own domain under Workers & Pages > team-tasks > Settings > D
 
 ## Updating an existing deployment
 
-If you deployed an earlier version, push the new code, then run `migrations/002_teams.sql` once in the D1 console
-(Storage & Databases > D1 > team-tasks-db > Console). It creates the Teams list from your existing users and clears
-the team on admin accounts.
+If you deployed an earlier version, push the new code, then run the migration files you have not run yet, in order,
+once each in the D1 console (Storage & Databases > D1 > team-tasks-db > Console):
+
+1. `migrations/002_teams.sql` - the Teams list (skip if already run).
+2. `migrations/003_in_progress_and_phone.sql` - the In progress status and WhatsApp numbers. Your existing tasks are kept.
+
+Run the migration before opening the new version of the site.
 
 ## Run locally
 
