@@ -16,7 +16,10 @@
     status: 'pending', // pending | in_progress | done (which list is showing)
     person: 'all',
     team: 'all',
+    flag: 'all', // all | priority | blocked (admin All tasks filter)
+    animate: true, // play entrance animations on the next render only
   };
+  let animating = false;
 
   const STATUSES = [
     ['pending', 'To do'],
@@ -58,6 +61,8 @@
     users: '<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
     tag: '<path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/>',
     check: '<polyline points="20 6 9 17 4 12"/>',
+    zap: '<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>',
+    alert: '<path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>',
   };
 
   function icon(name, size = 18) {
@@ -72,6 +77,88 @@
   const initials = (name) =>
     name.trim().split(/\s+/).slice(0, 2).map((w) => w[0] || '').join('').toUpperCase() || '?';
   const avatar = (name) => h('span', { class: 'avatar', 'aria-hidden': 'true' }, initials(name));
+
+  const stagger = (els) => {
+    els.forEach((el, i) => el.style.setProperty('--i', Math.min(i, 12)));
+    return els;
+  };
+
+  function timeAgo(ms) {
+    const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+    if (s < 60) return 'just now';
+    const m = Math.round(s / 60);
+    if (m < 60) return `${m} min ago`;
+    const hr = Math.round(m / 60);
+    if (hr < 24) return `${hr} h ago`;
+    const d = Math.round(hr / 24);
+    return d < 7 ? `${d} d ago` : new Date(ms).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+  }
+
+  // Numbers count up when a page first appears.
+  function countUp(el, target) {
+    if (!animating || target === 0) { el.textContent = String(target); return; }
+    const t0 = performance.now();
+    el.textContent = '0';
+    const tick = (now) => {
+      const p = Math.min(1, (now - t0) / 700);
+      el.textContent = String(Math.round(target * (1 - Math.pow(1 - p, 3))));
+      if (p < 1) requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  }
+
+  // Circular completion meter that draws itself in.
+  function progressRing(done, total) {
+    const pct = total ? Math.round((done / total) * 100) : 0;
+    const C = 2 * Math.PI * 26;
+    const wrap = h('div', { class: 'ring', role: 'img', 'aria-label': total ? `${pct}% of tasks done (${done} of ${total})` : 'No tasks yet' });
+    wrap.innerHTML =
+      '<svg viewBox="0 0 64 64" width="64" height="64"><defs><linearGradient id="ringGrad" x1="0" y1="0" x2="1" y2="1"><stop offset="0" class="g1"/><stop offset="1" class="g2"/></linearGradient></defs>' +
+      '<circle class="track" cx="32" cy="32" r="26"/><circle class="bar" cx="32" cy="32" r="26" transform="rotate(-90 32 32)"/></svg>' +
+      `<span class="ring-n">${pct}%</span>`;
+    const bar = wrap.querySelector('.bar');
+    const target = C * (1 - pct / 100);
+    bar.style.strokeDasharray = String(C);
+    if (animating) {
+      bar.style.strokeDashoffset = String(C);
+      requestAnimationFrame(() => requestAnimationFrame(() => { bar.style.strokeDashoffset = String(target); }));
+    } else {
+      bar.style.strokeDashoffset = String(target);
+    }
+    return wrap;
+  }
+
+  function emptyState(message) {
+    const art = document.createElement('div');
+    art.className = 'empty-art';
+    art.setAttribute('aria-hidden', 'true');
+    art.innerHTML =
+      '<svg viewBox="0 0 120 90" width="120" height="90" fill="none"><rect class="e-card" x="22" y="16" width="76" height="58" rx="10"/>' +
+      '<line class="e-line" x1="36" y1="34" x2="84" y2="34"/><line class="e-line" x1="36" y1="46" x2="70" y2="46"/>' +
+      '<circle class="e-dot" cx="90" cy="64" r="14"/><polyline class="e-check" points="83 64 88 69 97 59"/></svg>';
+    return h('div', { class: 'empty' }, art, h('p', null, message));
+  }
+
+  // Confetti burst when a task is finished.
+  function celebrate(x, y) {
+    if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    const colors = ['#34c3a8', '#4ab0e0', '#f2b45c', '#ff8f85', '#a78bfa', '#6ea4ff'];
+    const layer = h('div', { class: 'confetti', 'aria-hidden': 'true' });
+    for (let i = 0; i < 26; i++) {
+      const p = document.createElement('i');
+      const angle = Math.random() * Math.PI * 2;
+      const dist = 60 + Math.random() * 110;
+      p.style.left = x + 'px';
+      p.style.top = y + 'px';
+      p.style.background = colors[i % colors.length];
+      p.style.setProperty('--dx', Math.cos(angle) * dist + 'px');
+      p.style.setProperty('--dy', Math.sin(angle) * dist - 40 + 'px');
+      p.style.setProperty('--rot', Math.round(Math.random() * 540 - 270) + 'deg');
+      layer.append(p);
+    }
+    document.body.append(layer);
+    setTimeout(() => layer.remove(), 1100);
+  }
 
   async function api(path, { method = 'GET', body } = {}) {
     const res = await fetch('/api' + path, {
@@ -132,6 +219,7 @@
   }
 
   const GROUPS = [
+    ['priority', 'Priority – do these first'],
     ['overdue', 'Overdue'],
     ['today', 'Today'],
     ['week', 'Next 7 days'],
@@ -143,17 +231,23 @@
 
   function waText(person, task, kind) {
     const first = person.name.trim().split(/\s+/)[0];
-    const lead =
-      kind === 'new'
-        ? `Hi ${first}, you have a new task: *${task.title}*.`
-        : `Hi ${first}, a quick reminder about your task: *${task.title}*.`;
+    const flag = task.priority ? '🔥 *PRIORITY* – needs to be done ASAP.\n' : '';
+    let lead;
+    if (kind === 'new') {
+      lead = `Hi ${first}, you have a new task: *${task.title}*.`;
+    } else if (kind === 'blocker') {
+      const b = task.blockers && task.blockers[0] ? task.blockers[0].body.slice(0, 200) : '';
+      lead = `Hi ${first}, I saw you are blocked on *${task.title}*: "${b}". Let's sort it out. What do you need?`;
+    } else {
+      lead = `Hi ${first}, a quick reminder about your task: *${task.title}*.`;
+    }
     let due = '';
     if (task.deadline) {
       const d = new Date(task.deadline);
       due = ` Due: ${fmtDate(d)}, ${fmtTime(d)}.`;
     }
-    const note = task.description ? `\n${task.description.slice(0, 300)}` : '';
-    return `${lead}${due}${note}\nOpen your tasks: ${location.origin}`;
+    const note = kind !== 'blocker' && task.description ? `\n${task.description.slice(0, 300)}` : '';
+    return `${flag}${lead}${due}${note}\nOpen your tasks: ${location.origin}`;
   }
 
   function waButton(person, task, kind) {
@@ -215,6 +309,8 @@
     state.status = 'pending';
     state.person = 'all';
     state.team = 'all';
+    state.flag = 'all';
+    state.animate = true;
     await loadTasks();
     if (state.user.role === 'admin') await Promise.all([loadUsers(), loadTeams()]);
     render();
@@ -224,6 +320,8 @@
     state.view = view;
     state.person = 'all';
     state.team = 'all';
+    state.flag = 'all';
+    state.animate = true;
     try {
       if (view === 'people' || view === 'teams') await Promise.all([loadUsers(), loadTeams()]);
       else {
@@ -241,6 +339,17 @@
 
   function field(label, name, type = 'text', attrs = {}, hint) {
     return h('label', { class: 'field' }, h('span', null, label), h('input', { name, type, ...attrs }), hint ? h('small', null, hint) : null);
+  }
+
+  function authDeco() {
+    return h(
+      'div',
+      { class: 'deco', 'aria-hidden': 'true' },
+      h('span', { class: 'deco-chip d1' }, h('i', { class: 'dot' }), 'To do'),
+      h('span', { class: 'deco-chip d2' }, h('i', { class: 'dot blue' }), 'In progress'),
+      h('span', { class: 'deco-chip d3' }, h('i', { class: 'dot green' }), 'Done'),
+      h('span', { class: 'deco-chip d4 hot' }, icon('zap', 14), 'Priority')
+    );
   }
 
   function loginScreen() {
@@ -270,7 +379,7 @@
       err,
       h('button', { class: 'btn primary', type: 'submit' }, 'Sign in')
     );
-    return h('main', { class: 'auth' }, themeButton('floating'), form);
+    return h('main', { class: 'auth' }, authDeco(), themeButton('floating'), form);
   }
 
   function setupScreen() {
@@ -306,7 +415,7 @@
       err,
       h('button', { class: 'btn primary', type: 'submit' }, 'Create admin account')
     );
-    return h('main', { class: 'auth' }, themeButton('floating'), form);
+    return h('main', { class: 'auth' }, authDeco(), themeButton('floating'), form);
   }
 
   /* ---------- shell: header, account menu, navigation ---------- */
@@ -384,7 +493,12 @@
 
   /* ---------- tasks ---------- */
 
+  const blockersOf = (t) => t.blockers || [];
+  const groupOf = (t) => (t.priority ? 'priority' : dueInfo(t).group);
+
   function statCard(key, label, count) {
+    const n = h('span', { class: 'stat-n' }, count);
+    countUp(n, count);
     return h(
       'button',
       {
@@ -393,7 +507,7 @@
         'aria-pressed': String(state.status === key),
         onclick: () => { state.status = key; render(); },
       },
-      h('span', { class: 'stat-n' }, count),
+      n,
       h('span', { class: 'stat-l' }, label)
     );
   }
@@ -407,19 +521,35 @@
       if (state.person !== 'all') tasks = tasks.filter((t) => String(t.assignee_id) === state.person);
       if (state.team !== 'all') tasks = tasks.filter((t) => t.assignee_team === state.team);
     }
+    const isOpen = (t) => t.status !== 'done';
+    const blockedCount = tasks.filter((t) => isOpen(t) && blockersOf(t).length).length;
+    const priorityCount = tasks.filter((t) => isOpen(t) && t.priority).length;
+    if (all && state.flag === 'priority') tasks = tasks.filter((t) => t.priority);
+    if (all && state.flag === 'blocked') tasks = tasks.filter((t) => blockersOf(t).length);
+
     const todo = tasks.filter((t) => t.status === 'pending');
     const prog = tasks.filter((t) => t.status === 'in_progress');
     const done = tasks.filter((t) => t.status === 'done').sort((a, b) => (b.completed_at || 0) - (a.completed_at || 0));
     const overdue = [...todo, ...prog].filter((t) => dueInfo(t).group === 'overdue').length;
+
+    const extra = [];
+    if (overdue) extra.push(h('span', { class: 'late' }, `${overdue} overdue`));
+    if (priorityCount) extra.push(h('span', { class: 'prio-s' }, `${priorityCount} priority`));
+    if (blockedCount) extra.push(h('span', { class: 'late' }, `${blockedCount} blocked`));
 
     const head = h(
       'div',
       { class: 'page-head' },
       h(
         'div',
-        null,
-        h('h1', null, all ? 'All tasks' : `Hi, ${state.user.name.trim().split(/\s+/)[0]}`),
-        h('p', { class: 'summary' }, `${todo.length} to do · ${prog.length} in progress`, overdue ? [' · ', h('span', { class: 'late' }, `${overdue} overdue`)] : null)
+        { class: 'head-main' },
+        progressRing(done.length, tasks.length),
+        h(
+          'div',
+          null,
+          h('h1', null, all ? 'All tasks' : `Hi, ${state.user.name.trim().split(/\s+/)[0]}`),
+          h('p', { class: 'summary' }, `${todo.length} to do · ${prog.length} in progress`, extra.map((x) => [' · ', x]))
+        )
       ),
       all
         ? h('button', { class: 'btn primary', type: 'button', onclick: () => taskDialog() }, icon('plus', 18), 'Assign task')
@@ -428,9 +558,30 @@
         : null
     );
 
-    const stats = h('div', { class: 'stats', role: 'group', 'aria-label': 'Filter by status' }, statCard('pending', 'To do', todo.length), statCard('in_progress', 'In progress', prog.length), statCard('done', 'Done', done.length));
+    const parts = [head];
 
-    const parts = [head, stats];
+    if (all && blockedCount && state.flag !== 'blocked') {
+      parts.push(
+        h(
+          'button',
+          { class: 'alert-strip', type: 'button', onclick: () => { state.flag = 'blocked'; render(); } },
+          icon('alert', 18),
+          h('span', null, `${plural(blockedCount, 'task')} blocked – people need your help`),
+          h('span', { class: 'alert-cta' }, 'View')
+        )
+      );
+    }
+
+    parts.push(
+      h(
+        'div',
+        { class: 'stats', role: 'group', 'aria-label': 'Filter by status' },
+        statCard('pending', 'To do', todo.length),
+        statCard('in_progress', 'In progress', prog.length),
+        statCard('done', 'Done', done.length)
+      )
+    );
+
     if (all) {
       const people = state.users.filter((u) => u.role === 'member');
       parts.push(
@@ -448,31 +599,42 @@
             { 'aria-label': 'Filter by person', value: state.person, onchange: (e) => { state.person = e.target.value; render(); } },
             h('option', { value: 'all' }, 'Everyone'),
             people.map((p) => h('option', { value: String(p.id) }, p.name + (p.active ? '' : ' (inactive)')))
+          ),
+          h(
+            'select',
+            { 'aria-label': 'Filter by flag', value: state.flag, onchange: (e) => { state.flag = e.target.value; render(); } },
+            h('option', { value: 'all' }, 'Any task'),
+            h('option', { value: 'priority' }, 'Priority only'),
+            h('option', { value: 'blocked' }, 'Blocked only')
           )
         )
       );
     }
 
     const list = state.status === 'done' ? done : state.status === 'in_progress' ? prog : todo;
+    let n = 0;
     if (!list.length) {
-      const msg = {
-        pending: all ? 'No to-do tasks match these filters.' : isAdmin ? 'Nothing on your list. Use "Add my task" to note something down.' : 'Nothing on your to-do list. New tasks will show up here.',
-        in_progress: all ? 'Nobody has a task in progress right now.' : 'Nothing in progress. Move a task here when you start working on it.',
-        done: 'No completed tasks yet.',
-      }[state.status];
-      parts.push(h('div', { class: 'empty' }, msg));
+      const msg =
+        all && state.flag !== 'all'
+          ? 'Nothing matches this filter.'
+          : {
+              pending: all ? 'No to-do tasks match these filters.' : isAdmin ? 'Nothing on your list. Use "Add my task" to note something down.' : 'Nothing on your to-do list. New tasks will show up here.',
+              in_progress: all ? 'Nobody has a task in progress right now.' : 'Nothing in progress. Move a task here when you start working on it.',
+              done: 'No completed tasks yet.',
+            }[state.status];
+      parts.push(emptyState(msg));
     } else if (state.status === 'done') {
-      parts.push(h('ul', { class: 'tasks' }, list.map((t) => taskCard(t, all, manage))));
+      parts.push(h('ul', { class: 'tasks' }, list.map((t) => taskCard(t, all, manage, n++))));
     } else {
       for (const [key, label] of GROUPS) {
-        const items = list.filter((t) => dueInfo(t).group === key);
+        const items = list.filter((t) => groupOf(t) === key);
         if (!items.length) continue;
         parts.push(
           h(
             'section',
             { class: 'group g-' + key },
-            h('h2', null, label, h('span', { class: 'count' }, items.length)),
-            h('ul', { class: 'tasks' }, items.map((t) => taskCard(t, all, manage)))
+            h('h2', null, key === 'priority' ? icon('zap', 16) : null, label, h('span', { class: 'count' }, items.length)),
+            h('ul', { class: 'tasks' }, items.map((t) => taskCard(t, all, manage, n++)))
           )
         );
       }
@@ -485,14 +647,18 @@
       'div',
       { class: 'status-seg', role: 'group', 'aria-label': `Status of ${t.title}` },
       STATUSES.map(([key, label]) =>
-        h('button', { type: 'button', class: `st st-${key}` + (t.status === key ? ' on' : ''), 'aria-pressed': String(t.status === key), onclick: () => setStatus(t, key) }, label)
+        h('button', { type: 'button', class: `st st-${key}` + (t.status === key ? ' on' : ''), 'aria-pressed': String(t.status === key), onclick: (e) => setStatus(t, key, e) }, label)
       )
     );
   }
 
-  function taskCard(t, all, manage) {
+  function taskCard(t, all, manage, i = 0) {
     const d = dueInfo(t);
     const person = all ? state.users.find((u) => u.id === t.assignee_id) : null;
+    const open = t.status !== 'done';
+    const mine = t.assignee_id === state.user.id;
+    const personal = mine && state.user.role === 'admin'; // an admin's own to-do
+    const blockers = open ? blockersOf(t) : [];
 
     const dueChip =
       t.status === 'done'
@@ -502,36 +668,96 @@
     const chips = h(
       'div',
       { class: 'chips' },
+      t.priority && open ? h('span', { class: 'chip prio' }, icon('zap', 13), 'Priority') : null,
       dueChip,
+      blockers.length ? h('span', { class: 'chip blocked' }, icon('alert', 13), 'Blocked') : null,
       all ? h('span', { class: 'chip person' }, avatar(t.assignee_name), t.assignee_name + (t.assignee_team ? ` · ${t.assignee_team}` : '')) : null
     );
 
+    const blockerBox = blockers.length
+      ? h(
+          'div',
+          { class: 'blockers' },
+          blockers.map((b) =>
+            h(
+              'div',
+              { class: 'blocker' },
+              icon('alert', 16),
+              h('div', { class: 'blocker-body' }, h('p', null, b.body), h('small', null, `${b.author_name} · ${timeAgo(b.created_at)}`)),
+              h('button', { class: 'link', type: 'button', onclick: () => resolveBlocker(b) }, 'Resolved')
+            )
+          )
+        )
+      : null;
+
     const actions = [];
-    if (all && t.status !== 'done') actions.push(waButton(person, t, 'reminder'));
+    if (all && open) actions.push(waButton(person, t, blockers.length ? 'blocker' : 'reminder'));
+    if (mine && !personal && open) {
+      actions.push(h('button', { class: 'link warn', type: 'button', onclick: () => blockerDialog(t) }, icon('alert', 14), 'Report a blocker'));
+    }
     if (manage) {
       actions.push(h('button', { class: 'link', type: 'button', onclick: () => taskDialog(t) }, 'Edit'));
       actions.push(h('button', { class: 'link danger', type: 'button', onclick: () => removeTask(t) }, 'Delete'));
     }
 
-    return h(
+    const li = h(
       'li',
-      { class: `task is-${t.status} tone-${d.tone}` },
-      h('div', { class: 'task-main' }, h('p', { class: 'title' }, t.title), t.description ? h('p', { class: 'desc' }, t.description) : null, chips),
+      { class: `task is-${t.status} tone-${d.tone}` + (t.priority && open ? ' is-priority' : '') + (blockers.length ? ' is-blocked' : '') },
+      h('div', { class: 'task-main' }, h('p', { class: 'title' }, t.title), t.description ? h('p', { class: 'desc' }, t.description) : null, chips, blockerBox),
       h('div', { class: 'task-side' }, statusControl(t), actions.length ? h('div', { class: 'actions' }, actions) : null)
     );
+    li.style.setProperty('--i', Math.min(i, 12));
+    return li;
   }
 
-  async function setStatus(t, status) {
+  async function setStatus(t, status, e) {
     if (t.status === status) return;
+    // Capture where to burst confetti before the list re-renders.
+    const rect = e && e.currentTarget ? e.currentTarget.getBoundingClientRect() : null;
     try {
       const r = await api('/tasks/' + t.id, { method: 'PATCH', body: { status } });
       t.status = r.task.status;
       t.completed_at = r.task.completed_at;
       render();
       toast(`Moved to ${STATUS_LABEL[status]}`);
+      if (status === 'done' && rect) celebrate(rect.left + rect.width / 2, rect.top);
+    } catch (err) {
+      toast(err.message);
+    }
+  }
+
+  async function resolveBlocker(b) {
+    try {
+      await api(`/blockers/${b.id}/resolve`, { method: 'POST' });
+      await loadTasks();
+      render();
+      toast('Blocker marked as resolved.');
     } catch (e) {
       toast(e.message);
     }
+  }
+
+  function blockerDialog(t) {
+    formDialog({
+      title: 'Report a blocker',
+      submit: 'Send to admin',
+      fields: [
+        h('p', { class: 'hint' }, `Task: ${t.title}`),
+        h(
+          'label',
+          { class: 'field' },
+          h('span', null, "What's holding this up?"),
+          h('textarea', { name: 'body', required: true, maxlength: 500, placeholder: 'e.g. Waiting for the client logo files' }),
+          h('small', null, 'Your admin will see this on the task. Mark it resolved once it is sorted.')
+        ),
+      ],
+      onSubmit: async (fd) => {
+        await api(`/tasks/${t.id}/blockers`, { method: 'POST', body: { body: fd.get('body') } });
+        await loadTasks();
+        render();
+        toast('Your admin can now see this.');
+      },
+    });
   }
 
   async function removeTask(t) {
@@ -677,6 +903,13 @@
           h('input', { type: 'datetime-local', name: 'deadline', value: task && task.deadline ? toLocalInput(task.deadline) : '' }),
           h('small', null, 'Leave empty for no deadline.')
         ),
+        h(
+          'label',
+          { class: 'check-row prio-check' },
+          h('input', { type: 'checkbox', name: 'priority', checked: !!(task && task.priority) }),
+          icon('zap', 16),
+          'Priority – needs to be done ASAP'
+        ),
         assigneeField,
       ],
       onSubmit: async (fd) => {
@@ -685,6 +918,7 @@
           title: fd.get('title'),
           description: fd.get('description'),
           deadline: deadline ? new Date(deadline).toISOString() : null,
+          priority: fd.get('priority') === 'on',
         };
         let after = null;
         if (personal) {
@@ -698,7 +932,7 @@
           if (!body.assignee_ids.length) throw new Error('Pick at least one person.');
           await api('/tasks', { method: 'POST', body });
           const ids = body.assignee_ids;
-          const info = { title: body.title, description: body.description, deadline: body.deadline };
+          const info = { title: body.title, description: body.description, deadline: body.deadline, priority: body.priority };
           after = () => notifyDialog(ids, info);
         }
         await loadTasks();
@@ -883,7 +1117,7 @@
         h('div', null, h('h1', null, 'People'), h('p', { class: 'summary' }, plural(state.users.filter((u) => u.active).length, 'active account'))),
         h('button', { class: 'btn primary', type: 'button', onclick: () => personDialog() }, icon('plus', 18), 'Add person')
       ),
-      h('ul', { class: 'cards' }, cards)
+      h('ul', { class: 'cards' }, stagger(cards))
     );
   }
 
@@ -939,7 +1173,7 @@
             )
           )
         )
-      : h('div', { class: 'empty' }, 'No teams yet. Add one, then put people in it from the People tab.');
+      : emptyState('No teams yet. Add one, then put people in it from the People tab.');
 
     return h(
       'main',
@@ -961,11 +1195,15 @@
     state.user = null;
     state.tasks = [];
     state.users = [];
+    state.animate = true;
     closeMenus();
     render();
   }
 
   function render() {
+    animating = state.animate;
+    state.animate = false;
+    root.classList.toggle('animate-in', animating);
     root.replaceChildren();
     if (state.loading) root.append(h('p', { class: 'boot' }, 'Loading…'));
     else if (state.needsSetup) root.append(setupScreen());

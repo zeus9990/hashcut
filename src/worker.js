@@ -219,7 +219,7 @@ async function changeOwnPassword(request, env, user) {
 /* ---------- tasks ---------- */
 
 const TASK_SELECT = `
-  SELECT t.id, t.title, t.description, t.deadline, t.status, t.completed_at, t.created_at,
+  SELECT t.id, t.title, t.description, t.deadline, t.status, t.priority, t.completed_at, t.created_at,
          t.assignee_id, u.name AS assignee_name, u.team AS assignee_team
     FROM tasks t JOIN users u ON u.id = t.assignee_id`;
 
@@ -228,9 +228,29 @@ const TASK_SELECT = `
 async function listTasks(env, user, url) {
   const mineOnly = user.role !== 'admin' || url.searchParams.get('mine') === '1';
   const where = mineOnly ? ' WHERE t.assignee_id = ?' : " WHERE u.role = 'member'";
-  const stmt = env.DB.prepare(TASK_SELECT + where + ' ORDER BY t.deadline IS NULL, t.deadline ASC, t.id DESC LIMIT 1000');
-  const { results } = await (mineOnly ? stmt.bind(user.id) : stmt).all();
-  return json({ tasks: results });
+  const taskStmt = env.DB.prepare(TASK_SELECT + where + ' ORDER BY t.deadline IS NULL, t.deadline ASC, t.id DESC LIMIT 1000');
+  // Open blockers for the same set of tasks (a single IN (...) list would exceed D1's 100-parameter limit).
+  const blockerStmt = env.DB.prepare(
+    `SELECT b.id, b.task_id, b.body, b.created_at, a.name AS author_name
+       FROM task_blockers b
+       JOIN tasks t ON t.id = b.task_id
+       JOIN users u ON u.id = t.assignee_id
+       JOIN users a ON a.id = b.author_id` +
+      where +
+      ' AND b.resolved_at IS NULL ORDER BY b.created_at ASC'
+  );
+  const [taskRes, blockerRes] = await env.DB.batch([
+    mineOnly ? taskStmt.bind(user.id) : taskStmt,
+    mineOnly ? blockerStmt.bind(user.id) : blockerStmt,
+  ]);
+
+  const byTask = new Map();
+  for (const b of blockerRes.results) {
+    if (!byTask.has(b.task_id)) byTask.set(b.task_id, []);
+    byTask.get(b.task_id).push({ id: b.id, body: b.body, created_at: b.created_at, author_name: b.author_name });
+  }
+  const tasks = taskRes.results.map((t) => ({ ...t, priority: !!t.priority, blockers: byTask.get(t.id) || [] }));
+  return json({ tasks });
 }
 
 async function createTasks(request, env, user) {
@@ -255,9 +275,9 @@ async function createTasks(request, env, user) {
   await env.DB.batch(
     ids.map((id) =>
       env.DB.prepare(
-        `INSERT INTO tasks (title, description, assignee_id, assigned_by, deadline, status, created_at)
-         VALUES (?, ?, ?, ?, ?, 'pending', ?)`
-      ).bind(title, description, id, user.id, dl.value, now)
+        `INSERT INTO tasks (title, description, assignee_id, assigned_by, deadline, priority, status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`
+      ).bind(title, description, id, user.id, dl.value, body.priority ? 1 : 0, now)
     )
   );
   return json({ ok: true, created: ids.length }, 201);
@@ -273,10 +293,10 @@ async function createOwnTask(request, env, user) {
   if (!dl.ok) return fail(400, 'That deadline is not a valid date.');
 
   await env.DB.prepare(
-    `INSERT INTO tasks (title, description, assignee_id, assigned_by, deadline, status, created_at)
-     VALUES (?, ?, ?, ?, ?, 'pending', ?)`
+    `INSERT INTO tasks (title, description, assignee_id, assigned_by, deadline, priority, status, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`
   )
-    .bind(title, description, user.id, user.id, dl.value, Date.now())
+    .bind(title, description, user.id, user.id, dl.value, body.priority ? 1 : 0, Date.now())
     .run();
   return json({ ok: true }, 201);
 }
@@ -327,8 +347,8 @@ async function updateTask(request, env, user, id) {
     if (!person) return fail(400, 'Pick an active member.');
   }
 
-  await env.DB.prepare('UPDATE tasks SET title = ?, description = ?, deadline = ?, assignee_id = ? WHERE id = ?')
-    .bind(title, description, dl.value, assignee, id)
+  await env.DB.prepare('UPDATE tasks SET title = ?, description = ?, deadline = ?, assignee_id = ?, priority = ? WHERE id = ?')
+    .bind(title, description, dl.value, assignee, body.priority ? 1 : 0, id)
     .run();
   return json({ ok: true });
 }
@@ -337,7 +357,49 @@ async function deleteTask(env, user, id) {
   const task = await fetchTask(env, id);
   if (!task) return fail(404, 'Task not found.');
   if (!taskPermissions(user, task).canManage) return fail(403, 'You cannot delete this task.');
-  await env.DB.prepare('DELETE FROM tasks WHERE id = ?').bind(id).run();
+  await env.DB.batch([
+    env.DB.prepare('DELETE FROM task_blockers WHERE task_id = ?').bind(id),
+    env.DB.prepare('DELETE FROM tasks WHERE id = ?').bind(id),
+  ]);
+  return json({ ok: true });
+}
+
+/* ---------- blockers ---------- */
+
+// The person doing a task can report what is holding it up; admins see it and can resolve it.
+async function addBlocker(request, env, user, taskId) {
+  const task = await fetchTask(env, taskId);
+  if (!task) return fail(404, 'Task not found.');
+  if (task.assignee_id !== user.id) return fail(403, 'Only the person assigned to this task can report a blocker.');
+  if (task.status === 'done') return fail(400, 'This task is already done.');
+
+  const body = clean((await readJson(request)).body, 500);
+  if (!body) return fail(400, 'Describe what is holding the task up.');
+
+  const open = await env.DB.prepare('SELECT COUNT(*) AS n FROM task_blockers WHERE task_id = ? AND resolved_at IS NULL')
+    .bind(taskId)
+    .first();
+  if (open.n >= 10) return fail(400, 'This task already has 10 open blockers. Resolve some first.');
+
+  await env.DB.prepare('INSERT INTO task_blockers (task_id, author_id, body, created_at) VALUES (?, ?, ?, ?)')
+    .bind(taskId, user.id, body, Date.now())
+    .run();
+  return json({ ok: true }, 201);
+}
+
+async function resolveBlocker(env, user, id) {
+  const row = await env.DB.prepare(
+    `SELECT b.id, b.resolved_at, t.assignee_id, u.role AS assignee_role
+       FROM task_blockers b JOIN tasks t ON t.id = b.task_id JOIN users u ON u.id = t.assignee_id
+      WHERE b.id = ?`
+  ).bind(id).first();
+  if (!row) return fail(404, 'Blocker not found.');
+  if (!taskPermissions(user, row).canTick) return fail(403, 'You cannot resolve this blocker.');
+  if (!row.resolved_at) {
+    await env.DB.prepare('UPDATE task_blockers SET resolved_at = ?, resolved_by = ? WHERE id = ?')
+      .bind(Date.now(), user.id, id)
+      .run();
+  }
   return json({ ok: true });
 }
 
@@ -499,6 +561,8 @@ async function deleteUser(env, admin, id) {
   const target = await env.DB.prepare('SELECT id FROM users WHERE id = ?').bind(id).first();
   if (!target) return fail(404, 'Person not found.');
   await env.DB.batch([
+    env.DB.prepare('DELETE FROM task_blockers WHERE task_id IN (SELECT id FROM tasks WHERE assignee_id = ?)').bind(id),
+    env.DB.prepare('DELETE FROM task_blockers WHERE author_id = ?').bind(id),
     env.DB.prepare('UPDATE tasks SET assigned_by = NULL WHERE assigned_by = ?').bind(id),
     env.DB.prepare('DELETE FROM tasks WHERE assignee_id = ?').bind(id),
     env.DB.prepare('DELETE FROM sessions WHERE user_id = ?').bind(id),
@@ -549,6 +613,10 @@ export default {
         if (method === 'PATCH' || method === 'PUT') return await updateTask(request, env, user, id);
         if (method === 'DELETE') return await deleteTask(env, user, id);
       }
+      const blockerAdd = path.match(/^\/api\/tasks\/(\d+)\/blockers$/);
+      if (blockerAdd && method === 'POST') return await addBlocker(request, env, user, Number(blockerAdd[1]));
+      const blockerResolve = path.match(/^\/api\/blockers\/(\d+)\/resolve$/);
+      if (blockerResolve && method === 'POST') return await resolveBlocker(env, user, Number(blockerResolve[1]));
 
       // Everything below is admin only
       const adminOnly =

@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   assignee_id  INTEGER NOT NULL REFERENCES users(id),
   assigned_by  INTEGER REFERENCES users(id),
   deadline     TEXT,
+  priority     INTEGER NOT NULL DEFAULT 0,
   status       TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'in_progress', 'done')),
   completed_at INTEGER,
   created_at   INTEGER NOT NULL
@@ -43,3 +44,14 @@ CREATE TABLE IF NOT EXISTS teams (
 );
 INSERT OR IGNORE INTO teams (name) VALUES ('Social Media'), ('Production'), ('BD');
 INSERT OR IGNORE INTO teams (name) SELECT DISTINCT team FROM users WHERE team != '';
+
+CREATE TABLE IF NOT EXISTS task_blockers (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id     INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  author_id   INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  body        TEXT NOT NULL,
+  created_at  INTEGER NOT NULL,
+  resolved_at INTEGER,
+  resolved_by INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_blockers_task ON task_blockers(task_id, resolved_at);

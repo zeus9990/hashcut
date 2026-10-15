@@ -2,10 +2,13 @@
 
 A small task manager for your organisation, running entirely on Cloudflare (Workers + D1, free tier is enough).
 
-- Members sign in with a username and password and see their own tasks. Each task has three states: **To do**, **In progress** and **Done**, changed with one tap. Tasks are grouped by urgency (Overdue / Today / Next 7 days / Later).
-- Admins get **My tasks** (a private to-do list of their own), **All tasks** (filter by team or person, see who is working on what, assign, edit, delete), **People** (add accounts, WhatsApp numbers, reset passwords, deactivate or delete) and **Teams** (add, rename, delete).
-- After assigning a task, admins get a **WhatsApp** button per person that opens WhatsApp with the message ready to send. Open tasks in All tasks also have a WhatsApp reminder button. It uses your normal WhatsApp, so it is free; you press send yourself.
+- Members sign in with a username and password and see their own tasks. Each task has three states: **To do**, **In progress** and **Done**, changed with one tap.
+- **Priority:** admins can mark a task as priority. It shows a pulsing red tag and is pinned to the top of the person's list under "Priority - do these first". The WhatsApp message also says it is a priority.
+- **Blockers:** a person can tap "Report a blocker" on a task and describe what is holding it up. Admins see a "Blocked" tag, the note, who wrote it and when, plus an alert strip on All tasks. Anyone involved can mark it resolved.
+- Admins get **My tasks** (a private to-do list of their own), **All tasks** (filter by team, person, priority or blocked; see who is working on what; assign, edit, delete), **People** (add accounts, WhatsApp numbers, reset passwords, deactivate or delete) and **Teams** (add, rename, delete).
+- After assigning a task, admins get a **WhatsApp** button per person that opens WhatsApp with the message ready to send. Open tasks in All tasks also have a WhatsApp reminder button (it switches to a "how can I help" message when the task is blocked). It uses your normal WhatsApp, so it is free; you press send yourself.
 - Admins do not belong to a team and cannot be assigned tasks.
+- Animated background, completion ring, count-up numbers, entrance animations and a confetti burst when a task is finished. Animations switch off for people who have "reduce motion" turned on.
 - Works on phones and desktops (bottom navigation and bottom-sheet dialogs on mobile) with a sun/moon night-mode switch.
 
 ## Deploy (about 10 minutes)
@@ -35,13 +38,19 @@ You can attach your own domain under Workers & Pages > team-tasks > Settings > D
 
 ## Updating an existing deployment
 
-If you deployed an earlier version, push the new code, then run the migration files you have not run yet, in order,
-once each in the D1 console (Storage & Databases > D1 > team-tasks-db > Console):
+Push the new code, then run each migration you have not run yet, in order, once each in the D1 console
+(Storage & Databases > D1 > team-tasks-db > Console), or from VS Code:
 
-1. `migrations/002_teams.sql` - the Teams list (skip if already run).
-2. `migrations/003_in_progress_and_phone.sql` - the In progress status and WhatsApp numbers. Your existing tasks are kept.
+```bash
+npx wrangler d1 execute team-tasks-db --remote --file=migrations/004_priority_and_blockers.sql
+```
 
-Run the migration before opening the new version of the site.
+1. `migrations/002_teams.sql` - the Teams list.
+2. `migrations/003_in_progress_and_phone.sql` - the In progress status and WhatsApp numbers. Existing tasks are kept.
+3. `migrations/004_priority_and_blockers.sql` - priority tags and blocker notes. Existing tasks are kept.
+
+The files contain no comments, so you can paste them straight into the console. If the console rejects several statements
+at once, run them one at a time in order. Run the migration before opening the new version of the site.
 
 ## Run locally
 
