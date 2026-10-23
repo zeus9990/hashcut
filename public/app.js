@@ -9,7 +9,7 @@
     loading: true,
     needsSetup: false,
     user: null,
-    view: 'mine', // mine | all | people | teams
+    view: 'mine', // mine | all | recurring | people | teams | sheets
     tasks: [],
     users: [],
     teams: [],
@@ -18,8 +18,15 @@
     team: 'all',
     flag: 'all', // all | priority | blocked (admin All tasks filter)
     animate: true, // play entrance animations on the next render only
+    flash: new Set(), // task ids that just changed (highlighted briefly)
+    tz: '', // organisation time zone used for repeating tasks
+    recurring: [], // repeating-task schedules (admins)
+    resources: [], // saved sheets and materials
+    resQuery: '',
+    resCat: 'all',
   };
   let animating = false;
+  const live = { ws: null, on: false, wanted: false, retry: 0, retryTimer: null, pingTimer: null, refreshTimer: null, dirty: false, catchUp: false, hiddenAt: 0 };
 
   const STATUSES = [
     ['pending', 'To do'],
@@ -27,6 +34,9 @@
     ['done', 'Done'],
   ];
   const STATUS_LABEL = Object.fromEntries(STATUSES);
+  const PRIO_LABEL = { 1: '1st priority', 2: '2nd priority', 3: '3rd priority' };
+  const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const REPEAT_SHORT = { daily: 'Daily', weekdays: 'Weekdays', weekly: 'Weekly' };
 
   /* ---------- tiny DOM helpers ---------- */
 
@@ -61,6 +71,13 @@
     users: '<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
     tag: '<path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/>',
     check: '<polyline points="20 6 9 17 4 12"/>',
+    repeat: '<polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/>',
+    grid: '<rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/>',
+    file: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>',
+    folder: '<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>',
+    link: '<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>',
+    star: '<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>',
+    copy: '<rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
     zap: '<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>',
     alert: '<path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>',
   };
@@ -76,7 +93,16 @@
   const logoMark = () => h('div', { class: 'logo' }, icon('check', 20));
   const initials = (name) =>
     name.trim().split(/\s+/).slice(0, 2).map((w) => w[0] || '').join('').toUpperCase() || '?';
-  const avatar = (name) => h('span', { class: 'avatar', 'aria-hidden': 'true' }, initials(name));
+  // Shows the person's photo when they have one, otherwise their initials.
+  function avatar(name, person) {
+    const el = h('span', { class: 'avatar', 'aria-hidden': 'true' }, initials(name));
+    if (person && person.avatar_v) {
+      const img = h('img', { src: `/api/avatar/${person.id}?v=${person.avatar_v}`, alt: '', decoding: 'async' });
+      img.addEventListener('error', () => img.remove()); // falls back to the initials
+      el.append(img);
+    }
+    return el;
+  }
 
   const stagger = (els) => {
     els.forEach((el, i) => el.style.setProperty('--i', Math.min(i, 12)));
@@ -172,6 +198,7 @@
     if (!res.ok) {
       if (res.status === 401 && state.user) {
         state.user = null;
+        stopLive();
         render();
       }
       throw new Error(data.error || 'Something went wrong. Try again.');
@@ -219,7 +246,9 @@
   }
 
   const GROUPS = [
-    ['priority', 'Priority – do these first'],
+    ['p1', '1st priority – do these first'],
+    ['p2', '2nd priority'],
+    ['p3', '3rd priority'],
     ['overdue', 'Overdue'],
     ['today', 'Today'],
     ['week', 'Next 7 days'],
@@ -231,7 +260,14 @@
 
   function waText(person, task, kind) {
     const first = person.name.trim().split(/\s+/)[0];
-    const flag = task.priority ? '🔥 *PRIORITY* – needs to be done ASAP.\n' : '';
+    const flag =
+      task.priority === 1
+        ? '🔴 *1st PRIORITY* – needs to be done ASAP.\n'
+        : task.priority === 2
+        ? '🟠 *2nd priority* – please do it after your 1st-priority tasks.\n'
+        : task.priority === 3
+        ? '🟡 *3rd priority*.\n'
+        : '';
     let lead;
     if (kind === 'new') {
       lead = `Hi ${first}, you have a new task: *${task.title}*.`;
@@ -303,6 +339,8 @@
   }
   async function loadUsers() { state.users = (await api('/users')).users; }
   async function loadTeams() { state.teams = (await api('/teams')).teams; }
+  async function loadRecurring() { state.recurring = (await api('/recurring')).recurring; }
+  async function loadResources() { state.resources = (await api('/resources')).resources; }
 
   async function enter() {
     state.view = 'mine';
@@ -314,6 +352,7 @@
     await loadTasks();
     if (state.user.role === 'admin') await Promise.all([loadUsers(), loadTeams()]);
     render();
+    startLive();
   }
 
   async function go(view) {
@@ -324,6 +363,8 @@
     state.animate = true;
     try {
       if (view === 'people' || view === 'teams') await Promise.all([loadUsers(), loadTeams()]);
+      else if (view === 'recurring') await Promise.all([loadUsers(), loadRecurring()]);
+      else if (view === 'sheets') await loadResources();
       else {
         await loadTasks();
         if (view === 'all') await Promise.all([loadUsers(), loadTeams()]);
@@ -335,21 +376,156 @@
     window.scrollTo({ top: 0 });
   }
 
+  /* ---------- live updates ---------- */
+
+  const taskSig = (t) => [t.status, t.priority, t.title, t.deadline, t.assignee_id, blockersOf(t).map((b) => b.id).join(',')].join('|');
+
+  function paintLive(el) {
+    el.classList.toggle('on', live.on);
+    const label = live.on ? 'Live updates on' : 'Connecting…';
+    el.title = label;
+    el.setAttribute('aria-label', label);
+    const text = el.querySelector('span');
+    if (text) text.textContent = live.on ? 'Live' : 'Connecting…';
+  }
+
+  function liveBadge() {
+    const el = h('span', { class: 'live', role: 'img' }, h('i'), h('span'));
+    paintLive(el);
+    return el;
+  }
+
+  function setLive(on) {
+    live.on = on;
+    document.querySelectorAll('.live').forEach(paintLive);
+  }
+
+  // Fetch fresh data after someone else changed something, then redraw without replaying animations.
+  async function liveRefresh() {
+    if (!state.user) return;
+    live.dirty = false;
+    const before = new Map(state.tasks.map((t) => [t.id, taskSig(t)]));
+    try {
+      await loadTasks();
+      if (state.user.role === 'admin') await Promise.all([loadUsers(), loadTeams()]);
+      if (state.view === 'recurring' && state.user.role === 'admin') await loadRecurring();
+      if (state.view === 'sheets') await loadResources();
+    } catch {
+      return;
+    }
+    state.flash = new Set(state.tasks.filter((t) => before.get(t.id) !== taskSig(t)).map((t) => t.id));
+    render();
+    setTimeout(() => { state.flash = new Set(); }, 2200);
+  }
+
+  function scheduleRefresh() {
+    clearTimeout(live.refreshTimer);
+    live.refreshTimer = setTimeout(liveRefresh, 300); // bursts of changes become one refresh
+  }
+
+  function onLiveMessage(m) {
+    if (!state.user) return;
+    if (document.hidden) { live.dirty = true; return; }
+    if (m.text && m.by !== state.user.id) toast(m.text);
+    scheduleRefresh();
+  }
+
+  // Drop the current connection without waiting for the browser's close event.
+  function dropSocket() {
+    const ws = live.ws;
+    live.ws = null;
+    clearInterval(live.pingTimer);
+    if (ws) {
+      ws.onclose = null;
+      ws.onmessage = null;
+      try { ws.close(); } catch { /* ignore */ }
+    }
+    setLive(false);
+  }
+
+  function connectLive() {
+    if (!state.user || live.ws) return;
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    let ws;
+    try { ws = new WebSocket(`${proto}://${location.host}/api/live`); } catch { scheduleReconnect(); return; }
+    live.ws = ws;
+    ws.onopen = () => {
+      live.retry = 0;
+      setLive(true);
+      clearInterval(live.pingTimer);
+      live.pingTimer = setInterval(() => { if (ws.readyState === 1) ws.send('ping'); }, 40000);
+      if (live.catchUp) { live.catchUp = false; liveRefresh(); } // pick up anything missed while offline
+    };
+    ws.onmessage = (e) => {
+      if (e.data === 'pong') return;
+      try {
+        const m = JSON.parse(e.data);
+        if (m.type === 'changed') onLiveMessage(m);
+        // The server ended this connection on purpose (access changed): re-check the session now.
+        if (m.type === 'bye' && live.wanted && state.user) {
+          dropSocket();
+          live.catchUp = true;
+          scheduleReconnect();
+        }
+      } catch { /* ignore malformed */ }
+    };
+    ws.onclose = () => {
+      clearInterval(live.pingTimer);
+      if (live.ws === ws) live.ws = null;
+      setLive(false);
+      if (live.wanted && state.user) { live.catchUp = true; scheduleReconnect(); }
+    };
+    ws.onerror = () => { try { ws.close(); } catch { /* ignore */ } };
+  }
+
+  function scheduleReconnect() {
+    if (!live.wanted || live.retryTimer) return;
+    const delay = Math.min(30000, 1000 * 2 ** live.retry);
+    live.retry += 1;
+    live.retryTimer = setTimeout(() => { live.retryTimer = null; reconnectLive(); }, delay);
+  }
+
+  // Before reconnecting, make sure the session is still valid (the person may have been
+  // deactivated or had their access changed while the connection was down).
+  async function reconnectLive() {
+    if (!live.wanted || !state.user) return;
+    try {
+      const r = await api('/me');
+      if (!r.user) {
+        state.user = null;
+        stopLive();
+        render();
+        toast('You have been signed out.');
+        return;
+      }
+      const roleChanged = r.user.role !== state.user.role;
+      state.user = r.user;
+      if (roleChanged) { await enter(); return; }
+    } catch {
+      scheduleReconnect(); // offline: try again later
+      return;
+    }
+    connectLive();
+  }
+
+  function startLive() {
+    live.wanted = true;
+    connectLive();
+  }
+
+  function stopLive() {
+    live.wanted = false;
+    clearTimeout(live.retryTimer);
+    clearTimeout(live.refreshTimer);
+    clearInterval(live.pingTimer);
+    live.retryTimer = null;
+    dropSocket();
+  }
+
   /* ---------- sign-in screens ---------- */
 
   function field(label, name, type = 'text', attrs = {}, hint) {
     return h('label', { class: 'field' }, h('span', null, label), h('input', { name, type, ...attrs }), hint ? h('small', null, hint) : null);
-  }
-
-  function authDeco() {
-    return h(
-      'div',
-      { class: 'deco', 'aria-hidden': 'true' },
-      h('span', { class: 'deco-chip d1' }, h('i', { class: 'dot' }), 'To do'),
-      h('span', { class: 'deco-chip d2' }, h('i', { class: 'dot blue' }), 'In progress'),
-      h('span', { class: 'deco-chip d3' }, h('i', { class: 'dot green' }), 'Done'),
-      h('span', { class: 'deco-chip d4 hot' }, icon('zap', 14), 'Priority')
-    );
   }
 
   function loginScreen() {
@@ -365,6 +541,7 @@
           try {
             const r = await api('/login', { method: 'POST', body: { username: fd.get('username'), password: fd.get('password') } });
             state.user = r.user;
+            state.tz = r.tz || '';
             await enter();
           } catch (ex) {
             err.textContent = ex.message;
@@ -379,7 +556,7 @@
       err,
       h('button', { class: 'btn primary', type: 'submit' }, 'Sign in')
     );
-    return h('main', { class: 'auth' }, authDeco(), themeButton('floating'), form);
+    return h('main', { class: 'auth' }, themeButton('floating'), form);
   }
 
   function setupScreen() {
@@ -415,7 +592,7 @@
       err,
       h('button', { class: 'btn primary', type: 'submit' }, 'Create admin account')
     );
-    return h('main', { class: 'auth' }, authDeco(), themeButton('floating'), form);
+    return h('main', { class: 'auth' }, themeButton('floating'), form);
   }
 
   /* ---------- shell: header, account menu, navigation ---------- */
@@ -425,13 +602,73 @@
     document.querySelectorAll('.avatar-btn').forEach((b) => b.setAttribute('aria-expanded', 'false'));
   }
 
+  // ----- profile photo: shrink to a small square JPEG in the browser, then upload -----
+  function toSquareJpeg(file, size = 192) {
+    return new Promise((resolve, reject) => {
+      if (!/^image\//.test(file.type)) return reject(new Error('Please choose an image file.'));
+      if (file.size > 20 * 1024 * 1024) return reject(new Error('That image is too large.'));
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error('Could not read that file.'));
+      reader.onload = () => {
+        const img = new Image();
+        img.onerror = () => reject(new Error('That image type is not supported. Try a JPG or PNG.'));
+        img.onload = () => {
+          const side = Math.min(img.width, img.height);
+          const canvas = document.createElement('canvas');
+          canvas.width = canvas.height = size;
+          const ctx = canvas.getContext('2d');
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(0, 0, size, size);
+          ctx.drawImage(img, (img.width - side) / 2, (img.height - side) / 2, side, side, 0, 0, size, size);
+          canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('Could not process that image.'))), 'image/jpeg', 0.85);
+        };
+        img.src = reader.result;
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  const photoInput = h('input', { type: 'file', accept: 'image/*', hidden: true });
+  photoInput.addEventListener('change', async () => {
+    const file = photoInput.files[0];
+    photoInput.value = '';
+    if (!file) return;
+    try {
+      const blob = await toSquareJpeg(file);
+      const res = await fetch('/api/avatar', { method: 'POST', headers: { 'Content-Type': 'image/jpeg' }, body: blob, credentials: 'same-origin' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Could not save the photo.');
+      state.user.avatar_v = data.v;
+      if (state.user.role === 'admin') await loadUsers();
+      render();
+      toast('Photo updated.');
+    } catch (e) {
+      toast(e.message);
+    }
+  });
+
+  async function removePhoto(person) {
+    const own = person.id === state.user.id;
+    try {
+      await api(own ? '/avatar' : `/avatar/${person.id}`, { method: 'DELETE' });
+      if (own) state.user.avatar_v = null;
+      if (state.user.role === 'admin') await loadUsers();
+      render();
+      toast(own ? 'Photo removed.' : `${person.name}'s photo was removed.`);
+    } catch (e) {
+      toast(e.message);
+    }
+  }
+
   function accountMenu() {
     const u = state.user;
     const sub = u.role === 'admin' ? 'Admin' : u.team || 'Member';
     const menu = h(
       'div',
       { class: 'menu', hidden: true },
-      h('div', { class: 'menu-who' }, h('strong', null, u.name), h('span', null, `@${u.username} · ${sub}`)),
+      h('div', { class: 'menu-who' }, avatar(u.name, u), h('div', null, h('strong', null, u.name), h('span', null, `@${u.username} · ${sub}`))),
+      h('button', { class: 'menu-item', type: 'button', onclick: () => { closeMenus(); photoInput.click(); } }, u.avatar_v ? 'Change photo' : 'Add a photo'),
+      u.avatar_v ? h('button', { class: 'menu-item', type: 'button', onclick: () => { closeMenus(); removePhoto(u); } }, 'Remove photo') : null,
       h('button', { class: 'menu-item', type: 'button', onclick: () => { closeMenus(); passwordDialog(); } }, 'Change password'),
       h('button', { class: 'menu-item', type: 'button', onclick: logout }, 'Sign out')
     );
@@ -453,48 +690,49 @@
           }
         },
       },
-      initials(u.name)
+      avatar(u.name, u)
     );
     return h('div', { class: 'account' }, btn, menu);
   }
 
   function shell() {
     const admin = state.user.role === 'admin';
-    const tabs = [['mine', 'My tasks', 'tasks']];
-    if (admin) tabs.push(['all', 'All tasks', 'layers'], ['people', 'People', 'users'], ['teams', 'Teams', 'tag']);
+    const tabs = [['mine', 'My tasks', 'Mine', 'tasks']];
+    if (admin) tabs.push(['all', 'All tasks', 'All', 'layers'], ['recurring', 'Repeating', 'Repeat', 'repeat'], ['people', 'People', 'People', 'users'], ['teams', 'Teams', 'Teams', 'tag']);
+    tabs.push(['sheets', 'Sheets', 'Sheets', 'grid']);
 
-    const nav = admin
-      ? h(
-          'nav',
-          { class: 'tabs', 'aria-label': 'Sections' },
-          tabs.map(([key, label, ic]) =>
-            h(
-              'button',
-              { class: 'tab' + (state.view === key ? ' on' : ''), type: 'button', 'aria-current': state.view === key ? 'page' : null, onclick: () => go(key) },
-              icon(ic, 20),
-              h('span', null, label)
-            )
-          )
+    const nav = h(
+      'nav',
+      { class: 'tabs', 'aria-label': 'Sections' },
+      tabs.map(([key, label, short, ic]) =>
+        h(
+          'button',
+          { class: 'tab' + (state.view === key ? ' on' : ''), type: 'button', 'aria-current': state.view === key ? 'page' : null, onclick: () => go(key) },
+          icon(ic, 20),
+          h('span', { class: 't-full' }, label),
+          h('span', { class: 't-short', 'aria-hidden': 'true' }, short)
         )
-      : null;
+      )
+    );
 
     const header = h(
       'header',
       { class: 'top' },
       h('div', { class: 'brand' }, logoMark(), h('span', null, ORG)),
       nav,
-      h('div', { class: 'top-right' }, themeButton(), accountMenu())
+      h('div', { class: 'top-right' }, liveBadge(), themeButton(), accountMenu())
     );
 
-    const page = state.view === 'people' ? peopleView() : state.view === 'teams' ? teamsView() : taskView(state.view === 'all');
-    if (admin) page.classList.add('has-nav');
+    const page =
+      state.view === 'people' ? peopleView() : state.view === 'teams' ? teamsView() : state.view === 'recurring' ? recurringView() : state.view === 'sheets' ? sheetsView() : taskView(state.view === 'all');
+    page.classList.add('has-nav');
     return h('div', null, header, page);
   }
 
   /* ---------- tasks ---------- */
 
   const blockersOf = (t) => t.blockers || [];
-  const groupOf = (t) => (t.priority ? 'priority' : dueInfo(t).group);
+  const groupOf = (t) => (t.priority ? 'p' + t.priority : dueInfo(t).group);
 
   function statCard(key, label, count) {
     const n = h('span', { class: 'stat-n' }, count);
@@ -525,6 +763,7 @@
     const blockedCount = tasks.filter((t) => isOpen(t) && blockersOf(t).length).length;
     const priorityCount = tasks.filter((t) => isOpen(t) && t.priority).length;
     if (all && state.flag === 'priority') tasks = tasks.filter((t) => t.priority);
+    if (all && /^p[123]$/.test(state.flag)) tasks = tasks.filter((t) => t.priority === Number(state.flag[1]));
     if (all && state.flag === 'blocked') tasks = tasks.filter((t) => blockersOf(t).length);
 
     const todo = tasks.filter((t) => t.status === 'pending');
@@ -604,7 +843,10 @@
             'select',
             { 'aria-label': 'Filter by flag', value: state.flag, onchange: (e) => { state.flag = e.target.value; render(); } },
             h('option', { value: 'all' }, 'Any task'),
-            h('option', { value: 'priority' }, 'Priority only'),
+            h('option', { value: 'priority' }, 'Any priority'),
+            h('option', { value: 'p1' }, '1st priority'),
+            h('option', { value: 'p2' }, '2nd priority'),
+            h('option', { value: 'p3' }, '3rd priority'),
             h('option', { value: 'blocked' }, 'Blocked only')
           )
         )
@@ -633,7 +875,7 @@
           h(
             'section',
             { class: 'group g-' + key },
-            h('h2', null, key === 'priority' ? icon('zap', 16) : null, label, h('span', { class: 'count' }, items.length)),
+            h('h2', null, /^p[123]$/.test(key) ? icon('zap', 16) : null, label, h('span', { class: 'count' }, items.length)),
             h('ul', { class: 'tasks' }, items.map((t) => taskCard(t, all, manage, n++)))
           )
         );
@@ -668,10 +910,11 @@
     const chips = h(
       'div',
       { class: 'chips' },
-      t.priority && open ? h('span', { class: 'chip prio' }, icon('zap', 13), 'Priority') : null,
+      t.priority && open ? h('span', { class: `chip prio p${t.priority}` }, icon('zap', 13), PRIO_LABEL[t.priority]) : null,
+      t.repeat ? h('span', { class: 'chip repeat' }, icon('repeat', 13), REPEAT_SHORT[t.repeat]) : null,
       dueChip,
       blockers.length ? h('span', { class: 'chip blocked' }, icon('alert', 13), 'Blocked') : null,
-      all ? h('span', { class: 'chip person' }, avatar(t.assignee_name), t.assignee_name + (t.assignee_team ? ` · ${t.assignee_team}` : '')) : null
+      all ? h('span', { class: 'chip person' }, avatar(t.assignee_name, person), t.assignee_name + (t.assignee_team ? ` · ${t.assignee_team}` : '')) : null
     );
 
     const blockerBox = blockers.length
@@ -702,7 +945,7 @@
 
     const li = h(
       'li',
-      { class: `task is-${t.status} tone-${d.tone}` + (t.priority && open ? ' is-priority' : '') + (blockers.length ? ' is-blocked' : '') },
+      { class: `task is-${t.status} tone-${d.tone}` + (t.priority && open ? ` is-priority is-p${t.priority}` : '') + (blockers.length ? ' is-blocked' : '') + (state.flash.has(t.id) ? ' flash' : '') },
       h('div', { class: 'task-main' }, h('p', { class: 'title' }, t.title), t.description ? h('p', { class: 'desc' }, t.description) : null, chips, blockerBox),
       h('div', { class: 'task-side' }, statusControl(t), actions.length ? h('div', { class: 'actions' }, actions) : null)
     );
@@ -774,6 +1017,62 @@
 
   /* ---------- dialogs ---------- */
 
+  function priorityField(value = 0) {
+    return h(
+      'label',
+      { class: 'field' },
+      h('span', null, 'Priority'),
+      h(
+        'select',
+        { name: 'priority', value: String(value) },
+        h('option', { value: '0' }, 'No priority'),
+        h('option', { value: '1' }, '1st priority – do first (ASAP)'),
+        h('option', { value: '2' }, '2nd priority'),
+        h('option', { value: '3' }, '3rd priority')
+      ),
+      h('small', null, 'Shown as a coloured tag, and priority tasks are pinned to the top of the list.')
+    );
+  }
+
+  const fmtHm = (hhmm) => {
+    const [hh, mm] = hhmm.split(':').map(Number);
+    return new Date(2000, 0, 1, hh, mm).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+  };
+  const scheduleText = (r) =>
+    (r.repeat === 'daily' ? 'Every day' : r.repeat === 'weekdays' ? 'Every weekday (Mon–Fri)' : `Every ${DAYS[r.weekday]}`) + (r.due_time ? ` · due by ${fmtHm(r.due_time)}` : '');
+
+  // "Repeat" selector with the extra day / time fields it needs.
+  function scheduleFields(initial = {}, onToggle = () => {}) {
+    const repeatSel = h(
+      'select',
+      { name: 'repeat', value: initial.repeat || '' },
+      h('option', { value: '' }, 'Does not repeat'),
+      h('option', { value: 'daily' }, 'Every day'),
+      h('option', { value: 'weekdays' }, 'Every weekday (Mon–Fri)'),
+      h('option', { value: 'weekly' }, 'Every week')
+    );
+    const dayLabel = h(
+      'label',
+      { class: 'field', hidden: initial.repeat !== 'weekly' },
+      h('span', null, 'On'),
+      h('select', { name: 'weekday', value: String(initial.weekday ?? 1) }, DAYS.map((d, i) => h('option', { value: String(i) }, d)))
+    );
+    const timeLabel = h(
+      'label',
+      { class: 'field', hidden: !initial.repeat },
+      h('span', null, 'Due by (optional)'),
+      h('input', { type: 'time', name: 'due_time', value: initial.due_time || '' }),
+      h('small', null, `Each copy is due at this time on the day it appears${state.tz ? ` (${state.tz} time)` : ''}.`)
+    );
+    repeatSel.addEventListener('change', () => {
+      dayLabel.hidden = repeatSel.value !== 'weekly';
+      timeLabel.hidden = !repeatSel.value;
+      onToggle(!!repeatSel.value);
+    });
+    const repeatLabel = h('label', { class: 'field' }, h('span', null, 'Repeat'), repeatSel, h('small', null, 'A repeating task appears in the person\'s list automatically each time it is due.'));
+    return [repeatLabel, dayLabel, timeLabel];
+  }
+
   function formDialog({ title, fields, submit, onSubmit }) {
     const err = h('p', { class: 'form-error', role: 'alert' });
     const btn = h('button', { class: 'btn primary', type: 'submit' }, submit);
@@ -836,7 +1135,7 @@
           'ul',
           { class: 'notify-list' },
           people.map((p) =>
-            h('li', null, avatar(p.name), h('div', { class: 'grow' }, h('strong', null, p.name), h('small', null, p.team || 'No team')), waButton(p, task, 'new'))
+            h('li', null, avatar(p.name, p), h('div', { class: 'grow' }, h('strong', null, p.name), h('small', null, p.team || 'No team')), waButton(p, task, 'new'))
           )
         ),
         missing ? h('p', { class: 'hint' }, 'Add missing numbers under People → Edit.') : null
@@ -845,7 +1144,7 @@
     });
   }
 
-  function taskDialog(task) {
+  function taskDialog(task, opts = {}) {
     const editing = !!task;
     // A "personal" task is an admin's own to-do: no assignee, private to that admin.
     const personal = task ? task.assignee_id === state.user.id : state.view === 'mine';
@@ -890,26 +1189,24 @@
       }
     }
 
+    const deadlineLabel = h(
+      'label',
+      { class: 'field', hidden: !!opts.repeating },
+      h('span', null, 'Deadline'),
+      h('input', { type: 'datetime-local', name: 'deadline', value: task && task.deadline ? toLocalInput(task.deadline) : '' }),
+      h('small', null, 'Leave empty for no deadline.')
+    );
+    const repeatFields = !personal && !editing ? scheduleFields({ repeat: opts.repeating ? 'daily' : '' }, (rep) => { deadlineLabel.hidden = rep; }) : [];
+
     formDialog({
-      title: personal ? (editing ? 'Edit your task' : 'Add a task for yourself') : editing ? 'Edit task' : 'Assign a task',
-      submit: editing ? 'Save changes' : personal ? 'Add task' : 'Assign task',
+      title: opts.repeating ? 'Add a repeating task' : personal ? (editing ? 'Edit your task' : 'Add a task for yourself') : editing ? 'Edit task' : 'Assign a task',
+      submit: opts.repeating ? 'Schedule task' : editing ? 'Save changes' : personal ? 'Add task' : 'Assign task',
       fields: [
         h('label', { class: 'field' }, h('span', null, 'Title'), h('input', { type: 'text', name: 'title', required: true, maxlength: 200, value: task ? task.title : '' })),
         h('label', { class: 'field' }, h('span', null, 'Details (optional)'), h('textarea', { name: 'description', maxlength: 2000 }, task ? task.description : '')),
-        h(
-          'label',
-          { class: 'field' },
-          h('span', null, 'Deadline'),
-          h('input', { type: 'datetime-local', name: 'deadline', value: task && task.deadline ? toLocalInput(task.deadline) : '' }),
-          h('small', null, 'Leave empty for no deadline.')
-        ),
-        h(
-          'label',
-          { class: 'check-row prio-check' },
-          h('input', { type: 'checkbox', name: 'priority', checked: !!(task && task.priority) }),
-          icon('zap', 16),
-          'Priority – needs to be done ASAP'
-        ),
+        deadlineLabel,
+        ...repeatFields,
+        priorityField(task ? task.priority : 0),
         assigneeField,
       ],
       onSubmit: async (fd) => {
@@ -918,7 +1215,7 @@
           title: fd.get('title'),
           description: fd.get('description'),
           deadline: deadline ? new Date(deadline).toISOString() : null,
-          priority: fd.get('priority') === 'on',
+          priority: Number(fd.get('priority')) || 0,
         };
         let after = null;
         if (personal) {
@@ -930,6 +1227,24 @@
         } else {
           body.assignee_ids = fd.getAll('assignee').map(Number);
           if (!body.assignee_ids.length) throw new Error('Pick at least one person.');
+          if (fd.get('repeat')) {
+            await api('/recurring', {
+              method: 'POST',
+              body: {
+                title: body.title,
+                description: body.description,
+                priority: body.priority,
+                repeat: fd.get('repeat'),
+                weekday: Number(fd.get('weekday')),
+                due_time: fd.get('due_time') || null,
+                assignee_ids: body.assignee_ids,
+              },
+            });
+            await Promise.all([loadRecurring(), loadTasks()]);
+            render();
+            toast('Repeating task scheduled.');
+            return null;
+          }
           await api('/tasks', { method: 'POST', body });
           const ids = body.assignee_ids;
           const info = { title: body.title, description: body.description, deadline: body.deadline, priority: body.priority };
@@ -1084,7 +1399,7 @@
         h(
           'div',
           { class: 'card-top' },
-          avatar(u.name),
+          avatar(u.name, u),
           h('div', null, h('strong', null, u.name, self ? h('span', { class: 'you' }, ' (you)') : null), h('small', null, '@' + u.username))
         ),
         h(
@@ -1103,6 +1418,7 @@
           'div',
           { class: 'row-actions' },
           h('button', { class: 'link', type: 'button', onclick: () => personDialog(u) }, 'Edit'),
+          u.avatar_v && !self ? h('button', { class: 'link', type: 'button', onclick: () => removePhoto(u) }, 'Remove photo') : null,
           self ? null : h('button', { class: 'link', type: 'button', onclick: () => setActive(u, !u.active) }, u.active ? 'Deactivate' : 'Reactivate'),
           self ? null : h('button', { class: 'link danger', type: 'button', onclick: () => removePerson(u) }, 'Delete')
         )
@@ -1118,6 +1434,279 @@
         h('button', { class: 'btn primary', type: 'button', onclick: () => personDialog() }, icon('plus', 18), 'Add person')
       ),
       h('ul', { class: 'cards' }, stagger(cards))
+    );
+  }
+
+  /* ---------- repeating tasks (admins) ---------- */
+
+  function recurringDialog(r) {
+    const members = state.users.filter((u) => u.role === 'member' && (u.active || u.id === r.assignee_id));
+    formDialog({
+      title: 'Edit repeating task',
+      submit: 'Save changes',
+      fields: [
+        h('label', { class: 'field' }, h('span', null, 'Title'), h('input', { type: 'text', name: 'title', required: true, maxlength: 200, value: r.title })),
+        h('label', { class: 'field' }, h('span', null, 'Details (optional)'), h('textarea', { name: 'description', maxlength: 2000 }, r.description)),
+        ...scheduleFields({ repeat: r.repeat, weekday: r.weekday, due_time: r.due_time }),
+        priorityField(r.priority),
+        h(
+          'label',
+          { class: 'field' },
+          h('span', null, 'Assigned to'),
+          h('select', { name: 'assignee', value: String(r.assignee_id) }, members.map((u) => h('option', { value: String(u.id) }, u.name + (u.team ? ` (${u.team})` : ''))))
+        ),
+      ],
+      onSubmit: async (fd) => {
+        if (!fd.get('repeat')) throw new Error('Pick how often it repeats, or delete the schedule.');
+        await api('/recurring/' + r.id, {
+          method: 'PATCH',
+          body: {
+            title: fd.get('title'),
+            description: fd.get('description'),
+            repeat: fd.get('repeat'),
+            weekday: Number(fd.get('weekday')),
+            due_time: fd.get('due_time') || null,
+            priority: Number(fd.get('priority')) || 0,
+            assignee_id: Number(fd.get('assignee')),
+          },
+        });
+        await loadRecurring();
+        render();
+        toast('Schedule updated. Changes apply from the next copy.');
+      },
+    });
+  }
+
+  async function toggleRecurring(r) {
+    try {
+      await api('/recurring/' + r.id, { method: 'PATCH', body: { active: !r.active } });
+      await loadRecurring();
+      render();
+      toast(r.active ? 'Paused. No new copies will be created.' : 'Resumed.');
+    } catch (e) {
+      toast(e.message);
+    }
+  }
+
+  async function removeRecurring(r) {
+    if (!confirm(`Delete the repeating task "${r.title}"?\n\nCopies already created stay in the task list; no new ones will be made.`)) return;
+    try {
+      await api('/recurring/' + r.id, { method: 'DELETE' });
+      await loadRecurring();
+      render();
+      toast('Schedule deleted.');
+    } catch (e) {
+      toast(e.message);
+    }
+  }
+
+  function recurringView() {
+    const cards = state.recurring.map((r) => {
+      const person = state.users.find((u) => u.id === r.assignee_id);
+      return h(
+        'li',
+        { class: 'card' + (r.active ? '' : ' off') },
+        h('div', { class: 'card-top' }, avatar(r.assignee_name, person), h('div', null, h('strong', null, r.title), h('small', null, r.assignee_name + (r.assignee_team ? ` · ${r.assignee_team}` : '')))),
+        h(
+          'div',
+          { class: 'chips' },
+          h('span', { class: 'chip repeat' }, icon('repeat', 13), scheduleText(r)),
+          r.priority ? h('span', { class: `chip prio p${r.priority}` }, icon('zap', 13), PRIO_LABEL[r.priority]) : null,
+          r.active ? null : h('span', { class: 'chip' }, 'Paused')
+        ),
+        r.description ? h('p', { class: 'desc' }, r.description) : null,
+        h(
+          'div',
+          { class: 'row-actions' },
+          h('button', { class: 'link', type: 'button', onclick: () => recurringDialog(r) }, 'Edit'),
+          h('button', { class: 'link', type: 'button', onclick: () => toggleRecurring(r) }, r.active ? 'Pause' : 'Resume'),
+          h('button', { class: 'link danger', type: 'button', onclick: () => removeRecurring(r) }, 'Delete')
+        )
+      );
+    });
+    return h(
+      'main',
+      { class: 'page' },
+      h(
+        'div',
+        { class: 'page-head' },
+        h('div', null, h('h1', null, 'Repeating tasks'), h('p', { class: 'summary' }, `${plural(state.recurring.filter((r) => r.active).length, 'active schedule')}${state.tz ? ` · ${state.tz} time` : ''}`)),
+        h('button', { class: 'btn primary', type: 'button', onclick: () => taskDialog(null, { repeating: true }) }, icon('plus', 18), 'Add repeating task')
+      ),
+      cards.length ? h('ul', { class: 'cards' }, stagger(cards)) : emptyState('No repeating tasks yet. Add one and it will appear in the person\'s list every day (or week) automatically.')
+    );
+  }
+
+  /* ---------- sheets and materials ---------- */
+
+  const hostOf = (url) => { try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return url; } };
+
+  // Recognises common spreadsheet / document links so each one gets a clear badge.
+  function linkKind(url) {
+    let u;
+    try { u = new URL(url); } catch { return { key: 'link', label: 'Link', ic: 'link' }; }
+    const host = u.hostname.replace(/^www\./, '');
+    const path = u.pathname.toLowerCase();
+    if (host === 'docs.google.com' && path.startsWith('/spreadsheets')) return { key: 'sheets', label: 'Google Sheet', ic: 'grid' };
+    if (host === 'docs.google.com' && path.startsWith('/document')) return { key: 'docs', label: 'Google Doc', ic: 'file' };
+    if (host === 'docs.google.com' && path.startsWith('/presentation')) return { key: 'slides', label: 'Google Slides', ic: 'file' };
+    if (host === 'drive.google.com') return { key: 'drive', label: 'Google Drive', ic: 'folder' };
+    if (/\.(xlsx|xlsm|xlsb|xls|csv)$/.test(path) || path.includes('/:x:/') || /excel/.test(u.href.toLowerCase())) return { key: 'excel', label: 'Excel', ic: 'grid' };
+    if (/sharepoint\.com$|onedrive\.live\.com$|1drv\.ms$/.test(host)) return { key: 'drive', label: 'OneDrive / SharePoint', ic: 'folder' };
+    if (/notion\.(so|site)$/.test(host)) return { key: 'docs', label: 'Notion', ic: 'file' };
+    if (/airtable\.com$/.test(host)) return { key: 'sheets', label: 'Airtable', ic: 'grid' };
+    return { key: 'link', label: host, ic: 'link' };
+  }
+
+  function resourceDialog(r) {
+    const editing = !!r;
+    const cats = [...new Set(['Reports', 'Templates', 'Reference', ...state.resources.map((x) => x.category).filter(Boolean)])];
+    formDialog({
+      title: editing ? 'Edit saved link' : 'Save a sheet or link',
+      submit: editing ? 'Save changes' : 'Save',
+      fields: [
+        h('label', { class: 'field' }, h('span', null, 'Link'), h('input', { type: 'text', name: 'url', required: true, inputmode: 'url', autocapitalize: 'none', autocomplete: 'off', placeholder: 'Paste the sheet or file link', value: r ? r.url : '' })),
+        h('label', { class: 'field' }, h('span', null, 'Name (optional)'), h('input', { type: 'text', name: 'title', maxlength: 120, placeholder: 'e.g. Weekly content calendar', value: r ? r.title : '' })),
+        h(
+          'label',
+          { class: 'field' },
+          h('span', null, 'Group (optional)'),
+          h('input', { type: 'text', name: 'category', list: 'cat-list', maxlength: 40, placeholder: 'e.g. Reports', value: r ? r.category : '' }),
+          h('datalist', { id: 'cat-list' }, cats.map((c) => h('option', { value: c }))),
+          h('small', null, 'Groups let you filter your list quickly.')
+        ),
+        h('label', { class: 'field' }, h('span', null, 'Note (optional)'), h('textarea', { name: 'note', maxlength: 300, placeholder: 'What is it for? Which tab or sheet to open?' }, r ? r.note : '')),
+        h('label', { class: 'check-row' }, h('input', { type: 'checkbox', name: 'pinned', checked: !!(r && r.pinned) }), 'Pin to the top'),
+      ],
+      onSubmit: async (fd) => {
+        const body = { url: fd.get('url'), title: fd.get('title'), category: fd.get('category'), note: fd.get('note'), pinned: fd.get('pinned') === 'on' };
+        if (editing) await api('/resources/' + r.id, { method: 'PATCH', body });
+        else await api('/resources', { method: 'POST', body });
+        await loadResources();
+        render();
+        toast(editing ? 'Saved.' : 'Link saved.');
+      },
+    });
+  }
+
+  async function togglePin(r) {
+    try {
+      await api('/resources/' + r.id, { method: 'PATCH', body: { pinned: !r.pinned } });
+      await loadResources();
+      render();
+    } catch (e) {
+      toast(e.message);
+    }
+  }
+
+  async function copyLink(r) {
+    try {
+      await navigator.clipboard.writeText(r.url);
+      toast('Link copied.');
+    } catch {
+      toast('Could not copy. Long-press the link to copy it.');
+    }
+  }
+
+  async function removeResource(r) {
+    if (!confirm(`Remove "${r.title}" from your saved links? The sheet itself is not affected.`)) return;
+    try {
+      await api('/resources/' + r.id, { method: 'DELETE' });
+      await loadResources();
+      render();
+      toast('Removed.');
+    } catch (e) {
+      toast(e.message);
+    }
+  }
+
+  function resourceCard(r, i) {
+    const kind = linkKind(r.url);
+    const li = h(
+      'li',
+      { class: 'res' },
+      h(
+        'a',
+        { class: 'res-main', href: r.url, target: '_blank', rel: 'noopener noreferrer', 'aria-label': `Open ${r.title}` },
+        h('span', { class: 'res-badge k-' + kind.key }, icon(kind.ic, 22)),
+        h(
+          'span',
+          { class: 'res-text' },
+          h('strong', null, r.title),
+          h('small', null, kind.key === 'link' ? kind.label : `${kind.label} · ${hostOf(r.url)}`),
+          r.note ? h('span', { class: 'res-note' }, r.note) : null
+        )
+      ),
+      h(
+        'div',
+        { class: 'res-foot' },
+        h('div', { class: 'chips' }, r.category ? h('span', { class: 'chip' }, r.category) : null),
+        h(
+          'div',
+          { class: 'res-actions' },
+          h('button', { class: 'icon-sm star' + (r.pinned ? ' on' : ''), type: 'button', 'aria-pressed': String(r.pinned), title: r.pinned ? 'Unpin' : 'Pin to top', 'aria-label': (r.pinned ? 'Unpin ' : 'Pin ') + r.title, onclick: () => togglePin(r) }, icon('star', 18)),
+          h('button', { class: 'icon-sm', type: 'button', title: 'Copy link', 'aria-label': 'Copy link to ' + r.title, onclick: () => copyLink(r) }, icon('copy', 18)),
+          h('button', { class: 'link', type: 'button', onclick: () => resourceDialog(r) }, 'Edit'),
+          h('button', { class: 'link danger', type: 'button', onclick: () => removeResource(r) }, 'Remove')
+        )
+      )
+    );
+    li.style.setProperty('--i', Math.min(i, 12));
+    return li;
+  }
+
+  function sheetsView() {
+    const items = state.resources;
+    const cats = [...new Set(items.map((r) => r.category).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+    const pinned = items.filter((r) => r.pinned).length;
+
+    const head = h(
+      'div',
+      { class: 'page-head' },
+      h('div', null, h('h1', null, 'Sheets & materials'), h('p', { class: 'summary' }, `${plural(items.length, 'link')} saved · only you can see these`)),
+      h('button', { class: 'btn primary', type: 'button', onclick: () => resourceDialog() }, icon('plus', 18), 'Save a link')
+    );
+    if (!items.length) {
+      return h('main', { class: 'page' }, head, emptyState('Save the sheets and files you work with (Google Sheets, Excel online, Drive folders) and open them in one tap.'));
+    }
+
+    const listBox = h('div');
+    function fill() {
+      const q = state.resQuery.trim().toLowerCase();
+      const list = items.filter((r) => {
+        const inGroup = state.resCat === 'all' || (state.resCat === '__pinned' ? r.pinned : r.category === state.resCat);
+        const hit = !q || `${r.title} ${r.note} ${r.category} ${hostOf(r.url)}`.toLowerCase().includes(q);
+        return inGroup && hit;
+      });
+      listBox.replaceChildren(list.length ? h('ul', { class: 'res-list' }, list.map(resourceCard)) : emptyState('Nothing matches. Try a different word or group.'));
+    }
+
+    const catChip = (key, label, count) =>
+      h('button', { type: 'button', class: 'cat' + (state.resCat === key ? ' on' : ''), 'aria-pressed': String(state.resCat === key), onclick: () => { state.resCat = key; render(); } }, label, h('span', { class: 'n' }, count));
+
+    const search = h('input', {
+      type: 'search',
+      class: 'search',
+      placeholder: 'Search your sheets…',
+      'aria-label': 'Search saved links',
+      autocomplete: 'off',
+      value: state.resQuery,
+      oninput: (e) => { state.resQuery = e.target.value; fill(); },
+    });
+    fill();
+    return h(
+      'main',
+      { class: 'page' },
+      head,
+      search,
+      h(
+        'div',
+        { class: 'cat-row', role: 'group', 'aria-label': 'Filter by group' },
+        catChip('all', 'All', items.length),
+        pinned ? catChip('__pinned', 'Pinned', pinned) : null,
+        cats.map((c) => catChip(c, c, items.filter((r) => r.category === c).length))
+      ),
+      listBox
     );
   }
 
@@ -1195,7 +1784,10 @@
     state.user = null;
     state.tasks = [];
     state.users = [];
+    state.recurring = [];
+    state.resources = [];
     state.animate = true;
+    stopLive();
     closeMenus();
     render();
   }
@@ -1212,11 +1804,21 @@
   }
 
   async function boot() {
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) { live.hiddenAt = Date.now(); return; }
+      if (!state.user || !live.wanted) return;
+      // A connection that sat in the background for a while may be dead without knowing it.
+      if (live.ws && Date.now() - live.hiddenAt > 60000) { live.catchUp = true; try { live.ws.close(); } catch { /* ignore */ } }
+      else if (!live.ws) { live.retry = 0; reconnectLive(); }
+      else if (live.dirty) liveRefresh();
+    });
+    document.body.append(photoInput);
     document.addEventListener('click', closeMenus);
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeMenus(); });
     try {
       const r = await api('/me');
       state.user = r.user;
+      state.tz = r.tz || '';
       state.needsSetup = !!r.needsSetup;
       state.loading = false;
       if (state.user) await enter();

@@ -8,9 +8,9 @@
     "db:remote": "wrangler d1 execute team-tasks-db --remote --file=schema.sql"
   },
   "devDependencies": {
-    "wrangler": "^4.151.0"
+    "wrangler": "^4.151.3"
   },
   "dependencies": {
-    "jsdom": "^30.1.2"
+    "jsdom": "^30.1.3"
   }
 }

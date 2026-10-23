@@ -7,6 +7,12 @@
     "binding": "ASSETS",
     "run_worker_first": ["/api/*"]
   },
+  "vars": { "TIMEZONE": "Asia/Kolkata" },
+  "triggers": { "crons": ["*/30 * * * *"] },
+  "durable_objects": {
+    "bindings": [{ "name": "REALTIME", "class_name": "Realtime" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Realtime"] }],
   "d1_databases": [
     {
       "binding": "DB",
