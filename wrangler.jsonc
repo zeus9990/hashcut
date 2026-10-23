@@ -1,5 +1,5 @@
 {
-  "name": "team-tasks",
+  "name": "workspace",
   "main": "src/worker.js",
   "compatibility_date": "2025-09-01",
   "assets": {
