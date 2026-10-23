@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const ORG = 'Team Tasks'; // change to your organisation's name
+  const ORG = 'Hashcut To-do'; // change to your organisation's name
   const DAY = 864e5;
 
   const root = document.getElementById('app');
@@ -90,7 +90,7 @@
     return el;
   }
 
-  const logoMark = () => h('div', { class: 'logo' }, icon('check', 20));
+  const logoMark = () => h('img', { class: 'logo-img', src: '/logo.png', alt: '', width: 36, height: 36 });
   const initials = (name) =>
     name.trim().split(/\s+/).slice(0, 2).map((w) => w[0] || '').join('').toUpperCase() || '?';
   // Shows the person's photo when they have one, otherwise their initials.

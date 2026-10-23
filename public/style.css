@@ -154,6 +154,8 @@ textarea { min-height: 5.5rem; resize: vertical; }
   background: var(--surface); border-bottom: 1px solid var(--line);
 }
 .brand { display: flex; align-items: center; gap: .65rem; font-weight: 700; font-size: 1.12rem; letter-spacing: -.01em; }
+.logo-img { width: 36px; height: 36px; border-radius: 50%; object-fit: cover; display: block; flex: none; }
+.auth-card .logo-img { width: 56px; height: 56px; margin-bottom: .25rem; }
 .tabs { display: flex; gap: .25rem; margin-left: .75rem; flex: 1; min-width: 0; overflow-x: auto; scrollbar-width: none; }
 .tabs::-webkit-scrollbar { display: none; }
 .t-short { display: none; }
