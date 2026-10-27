@@ -8,7 +8,8 @@ CREATE TABLE IF NOT EXISTS users (
   password_hash TEXT NOT NULL,
   salt          TEXT NOT NULL,
   active        INTEGER NOT NULL DEFAULT 1,
-  created_at    INTEGER NOT NULL
+  created_at    INTEGER NOT NULL,
+  log_seen_id   INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -90,3 +91,16 @@ CREATE TABLE IF NOT EXISTS avatars (
   data       TEXT NOT NULL,
   updated_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS activity_log (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  actor_id   INTEGER NOT NULL,
+  actor_name TEXT NOT NULL,
+  kind       TEXT NOT NULL CHECK (kind IN ('added', 'done', 'rescheduled')),
+  task_id    INTEGER,
+  task_title TEXT NOT NULL,
+  old_value  TEXT,
+  new_value  TEXT,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_log_created ON activity_log(created_at);

@@ -3,6 +3,8 @@
 A small task manager for your organisation, running entirely on Cloudflare (Workers + D1, free tier is enough).
 
 - Members sign in with a username and password and see their own tasks. Each task has three states: **To do**, **In progress** and **Done**, changed with one tap.
+- **Members can add their own tasks:** an employee taps **Add task** and the task goes on their own list, so admins no longer have to assign everything. These tasks are marked **Self-added**, show up in the admin's **All tasks** like any other task, and can be edited by the employee (title, details and deadline) but not deleted or given a priority. Only admins set priority and delete tasks.
+- **Activity log (admins):** the **Log** tab lists what employees do on their own: adding a task for themselves, finishing a task, and changing the deadline of a task they added (with the old and new time). Progress changes (To do / In progress) are not logged. A **red dot** on the Log tab shows there are entries you have not read yet; it clears when you open the tab, and new entries are tagged **New** until you leave. Entries are kept for 90 days.
 - **Priority levels:** admins can mark a task as **1st, 2nd or 3rd priority**. Each level has its own coloured tag (1st pulses red), and priority tasks are pinned to the top of the person's list in that order. The WhatsApp message names the level. Admins can filter All tasks by level.
 - **Repeating tasks:** admins can make a task repeat **every day, every weekday (Mon-Fri) or every week**, with an optional due time. A fresh copy appears in the person's list automatically each time it is due, tagged "Daily" / "Weekdays" / "Weekly". The **Repeating** tab lists every schedule with Edit, Pause/Resume and Delete. Copies already created are kept if a schedule is deleted.
 - **Sheets & materials:** every person (members and admins) has a **Sheets** tab to save the links they work with: Google Sheets, Excel online / SharePoint, Drive folders, docs. Each link has a name, optional group and note; you can pin favourites, search, filter by group, copy the link and open it in one tap. Links are private to each person. Excel files themselves are not uploaded; the link to them is saved.
@@ -37,9 +39,9 @@ npm run deploy
 npx wrangler secret put SETUP_KEY
 ```
 
-Open the URL Wrangler prints (`https://team-tasks.<your-subdomain>.workers.dev`). The first visit shows **Create the first admin**; enter your SETUP_KEY and your details. After that, use **People > Add person** to create accounts for everyone and share their passwords privately.
+Open the URL Wrangler prints (`https://workspace.<your-subdomain>.workers.dev`). The first visit shows **Create the first admin**; enter your SETUP_KEY and your details. After that, use **People > Add person** to create accounts for everyone and share their passwords privately.
 
-You can attach your own domain under Workers & Pages > team-tasks > Settings > Domains & Routes.
+You can attach your own domain under Workers & Pages > workspace > Settings > Domains & Routes.
 
 ## Repeating tasks, time zone and the scheduled job
 
@@ -72,13 +74,14 @@ It runs on the Workers Free plan (Durable Objects are limited to SQLite-backed o
 Run each migration you have not run yet, in order, once each in the D1 console (Storage & Databases > D1 > team-tasks-db > Console), or from VS Code:
 
 ```bash
-npx wrangler d1 execute team-tasks-db --remote --file=migrations/005_repeating_sheets_photos.sql
+npx wrangler d1 execute team-tasks-db --remote --file=migrations/006_activity_log.sql
 ```
 
 1. `migrations/002_teams.sql` - the Teams list.
 2. `migrations/003_in_progress_and_phone.sql` - the In progress status and WhatsApp numbers.
 3. `migrations/004_priority_and_blockers.sql` - priority tags and blocker notes.
 4. `migrations/005_repeating_sheets_photos.sql` - repeating tasks, saved sheets and profile photos.
+5. `migrations/006_activity_log.sql` - the activity log and the red-dot "read up to here" marker for each admin.
 
 Existing tasks are kept. Tasks you already marked "priority" become **1st priority**.
 The files contain no comments, so you can paste them straight into the console. If the console rejects several statements at once, run them one at a time in order.

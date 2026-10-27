@@ -104,6 +104,12 @@ function parseDeadline(value) {
   return { ok: true, value: d.toISOString() };
 }
 
+// Two deadlines (ISO strings or null) count as the same if they fall in the same minute.
+function sameMinute(a, b) {
+  if (!a || !b) return !a && !b;
+  return Math.floor(new Date(a).getTime() / 60000) === Math.floor(new Date(b).getTime() / 60000);
+}
+
 // Priority levels: 0 = none, 1 = 1st priority (ASAP), 2 = 2nd, 3 = 3rd.
 const PRIORITY_LABEL = { 1: '1st priority', 2: '2nd priority', 3: '3rd priority' };
 function normPriority(v) {
@@ -325,7 +331,7 @@ async function changeOwnPassword(request, env, user) {
 
 const TASK_SELECT = `
   SELECT t.id, t.title, t.description, t.deadline, t.status, t.priority, t.completed_at, t.created_at,
-         t.assignee_id, t.recurring_id, r.repeat AS repeat, u.name AS assignee_name, u.team AS assignee_team
+         t.assignee_id, t.assigned_by, t.recurring_id, r.repeat AS repeat, u.name AS assignee_name, u.team AS assignee_team
     FROM tasks t JOIN users u ON u.id = t.assignee_id
     LEFT JOIN recurring_tasks r ON r.id = t.recurring_id`;
 
@@ -357,7 +363,12 @@ async function listTasks(env, user, url) {
     if (!byTask.has(b.task_id)) byTask.set(b.task_id, []);
     byTask.get(b.task_id).push({ id: b.id, body: b.body, created_at: b.created_at, author_name: b.author_name });
   }
-  const tasks = taskRes.results.map((t) => ({ ...t, priority: Number(t.priority) || 0, blockers: byTask.get(t.id) || [] }));
+  const tasks = taskRes.results.map(({ assigned_by, ...t }) => ({
+    ...t,
+    priority: Number(t.priority) || 0,
+    self_added: assigned_by === t.assignee_id, // the person added this task for themselves
+    blockers: byTask.get(t.id) || [],
+  }));
   return json({ tasks });
 }
 
@@ -397,22 +408,40 @@ async function createTasks(request, env, user) {
   return json({ ok: true, created: ids.length }, 201);
 }
 
-// An admin's own to-do item.
+const MEMBER_OPEN_SELF_TASKS = 100;
+
+// A person's own to-do item. For an admin it is private. For a member it is a normal task
+// that admins can see in All tasks, and adding it is written to the activity log.
+// Only admins set priority, so a member's task always starts with none.
 async function createOwnTask(request, env, user) {
   const body = await readJson(request);
   const title = clean(body.title, 200);
   const description = clean(body.description, 2000);
   const dl = parseDeadline(body.deadline);
+  const isMember = user.role !== 'admin';
   if (!title) return fail(400, 'Give the task a title.');
   if (!dl.ok) return fail(400, 'That deadline is not a valid date.');
 
-  await env.DB.prepare(
+  if (isMember) {
+    const open = await env.DB.prepare(
+      "SELECT COUNT(*) AS n FROM tasks WHERE assignee_id = ? AND assigned_by = ? AND status != 'done'"
+    ).bind(user.id, user.id).first();
+    if (open.n >= MEMBER_OPEN_SELF_TASKS) return fail(400, `You already have ${MEMBER_OPEN_SELF_TASKS} open tasks you added yourself. Finish some first.`);
+  }
+
+  const res = await env.DB.prepare(
     `INSERT INTO tasks (title, description, assignee_id, assigned_by, deadline, priority, status, created_at)
      VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`
   )
-    .bind(title, description, user.id, user.id, dl.value, normPriority(body.priority), Date.now())
+    .bind(title, description, user.id, user.id, dl.value, isMember ? 0 : normPriority(body.priority), Date.now())
     .run();
-  await emit(env, { by: user.id, users: [user.id], admins: false }); // private: only this admin's other devices
+
+  if (isMember) {
+    await logEvent(env, user, 'added', { id: res.meta.last_row_id, title }, null, dl.value);
+    await emit(env, { by: user.id, users: [user.id], admins: true, adminText: `${user.name} added a task: ${q(title)}` });
+  } else {
+    await emit(env, { by: user.id, users: [user.id], admins: false }); // private: only this admin's other devices
+  }
   return json({ ok: true }, 201);
 }
 
@@ -425,7 +454,9 @@ async function fetchTask(env, id) {
 function taskPermissions(user, task) {
   const personal = task.assignee_role === 'admin'; // an admin's private to-do
   const canManage = personal ? task.assignee_id === user.id : user.role === 'admin';
-  return { personal, canManage, canTick: canManage || task.assignee_id === user.id };
+  // A member may edit (but not delete or re-prioritise) a task they added for themselves.
+  const ownAdded = !personal && user.role === 'member' && task.assignee_id === user.id && task.assigned_by === user.id;
+  return { personal, canManage, canEdit: canManage || ownAdded, canTick: canManage || task.assignee_id === user.id };
 }
 
 async function updateTask(request, env, user, id) {
@@ -443,6 +474,10 @@ async function updateTask(request, env, user, id) {
       .bind(body.status, completedAt, id)
       .run();
     const byAssignee = task.assignee_id === user.id;
+    // Log only the moment an employee finishes a task (not every progress change, and not re-ticks).
+    if (body.status === 'done' && task.status !== 'done' && byAssignee && user.role === 'member') {
+      await logEvent(env, user, 'done', task, null, null);
+    }
     await emit(env, {
       by: user.id,
       users: [task.assignee_id],
@@ -454,7 +489,8 @@ async function updateTask(request, env, user, id) {
   }
 
   // Full edit.
-  if (!perm.canManage) return fail(403, 'You cannot edit this task.');
+  if (!perm.canEdit) return fail(403, 'You cannot edit this task.');
+  const memberEdit = !perm.canManage; // a member editing a task they added themselves
   const title = clean(body.title, 200);
   const description = clean(body.description, 2000);
   const dl = parseDeadline(body.deadline);
@@ -462,7 +498,7 @@ async function updateTask(request, env, user, id) {
   if (!dl.ok) return fail(400, 'That deadline is not a valid date.');
 
   let assignee = task.assignee_id;
-  if (!perm.personal && Number(body.assignee_id) !== task.assignee_id) {
+  if (!perm.personal && !memberEdit && Number(body.assignee_id) !== task.assignee_id) {
     assignee = Number(body.assignee_id);
     const person = await env.DB.prepare("SELECT id FROM users WHERE id = ? AND active = 1 AND role = 'member'")
       .bind(assignee)
@@ -470,9 +506,14 @@ async function updateTask(request, env, user, id) {
     if (!person) return fail(400, 'Pick an active member.');
   }
 
+  const priority = memberEdit ? Number(task.priority) || 0 : normPriority(body.priority);
   await env.DB.prepare('UPDATE tasks SET title = ?, description = ?, deadline = ?, assignee_id = ?, priority = ? WHERE id = ?')
-    .bind(title, description, dl.value, assignee, normPriority(body.priority), id)
+    .bind(title, description, dl.value, assignee, priority, id)
     .run();
+
+  const timeChanged = !sameMinute(task.deadline, dl.value);
+  if (memberEdit && timeChanged) await logEvent(env, user, 'rescheduled', { id, title }, task.deadline, dl.value);
+
   if (assignee !== task.assignee_id) {
     await emit(env, { by: user.id, users: [assignee], admins: true, userText: `New task: ${q(title)}` });
     await emit(env, { by: user.id, users: [task.assignee_id], admins: false, userText: `${q(task.title)} was reassigned` });
@@ -482,9 +523,10 @@ async function updateTask(request, env, user, id) {
       users: [assignee],
       admins: !perm.personal,
       userText:
-        normPriority(body.priority) && normPriority(body.priority) !== task.priority
-          ? `${q(title)} is now ${PRIORITY_LABEL[normPriority(body.priority)]}`
+        priority && priority !== task.priority
+          ? `${q(title)} is now ${PRIORITY_LABEL[priority]}`
           : `${q(title)} was updated`,
+      adminText: memberEdit ? `${user.name} ${timeChanged ? 'changed the deadline of' : 'edited'} ${q(title)}` : null,
     });
   }
   return json({ ok: true });
@@ -781,6 +823,59 @@ async function resolveBlocker(env, user, id) {
   return json({ ok: true });
 }
 
+/* ---------- activity log (admin) ---------- */
+
+// What gets logged: an employee adding a task for themselves ('added'), finishing a task
+// ('done') and changing the deadline of a task they added ('rescheduled').
+// Progress changes (To do / In progress) are deliberately not logged.
+// A failed log write never blocks the action itself.
+async function logEvent(env, user, kind, task, oldValue, newValue) {
+  try {
+    await env.DB.prepare(
+      'INSERT INTO activity_log (actor_id, actor_name, kind, task_id, task_title, old_value, new_value, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+    )
+      .bind(user.id, user.name, kind, task.id ?? null, task.title, oldValue ?? null, newValue ?? null, Date.now())
+      .run();
+  } catch (e) {
+    console.error('activity log failed', e);
+  }
+}
+
+const LOG_KEEP_DAYS = 90;
+
+async function pruneLog(env) {
+  try {
+    await env.DB.prepare('DELETE FROM activity_log WHERE created_at < ?').bind(Date.now() - LOG_KEEP_DAYS * 864e5).run();
+  } catch (e) {
+    console.error('log cleanup failed', e);
+  }
+}
+
+async function unreadCount(env, user) {
+  const row = await env.DB.prepare(
+    'SELECT COUNT(*) AS n FROM activity_log WHERE id > (SELECT log_seen_id FROM users WHERE id = ?)'
+  ).bind(user.id).first();
+  return row.n;
+}
+
+// Newest first. `seen_id` is how far this admin had read before now, so the page can mark what is new.
+async function listLog(env, user) {
+  const [rows, me] = await env.DB.batch([
+    env.DB.prepare(
+      'SELECT id, actor_id, actor_name, kind, task_id, task_title, old_value, new_value, created_at FROM activity_log ORDER BY id DESC LIMIT 200'
+    ),
+    env.DB.prepare('SELECT log_seen_id FROM users WHERE id = ?').bind(user.id),
+  ]);
+  return json({ entries: rows.results, seen_id: me.results[0] ? me.results[0].log_seen_id : 0, unread: await unreadCount(env, user) });
+}
+
+async function markLogSeen(request, env, user) {
+  const upto = Number((await readJson(request)).upto);
+  if (!Number.isInteger(upto) || upto < 0) return fail(400, 'Invalid log position.');
+  await env.DB.prepare('UPDATE users SET log_seen_id = MAX(log_seen_id, ?) WHERE id = ?').bind(upto, user.id).run();
+  return json({ ok: true });
+}
+
 /* ---------- teams (admin) ---------- */
 
 async function findTeam(env, name) {
@@ -961,7 +1056,7 @@ async function deleteUser(env, admin, id) {
 export default {
   // Cron trigger (see wrangler.jsonc): creates each day's copies of repeating tasks.
   async scheduled(controller, env, ctx) {
-    ctx.waitUntil(generateDue(env));
+    ctx.waitUntil(Promise.all([generateDue(env), pruneLog(env)]));
   },
 
   async fetch(request, env) {
@@ -996,6 +1091,7 @@ export default {
       if (path === '/api/live' && method === 'GET') return await live(request, env, user);
       if (path === '/api/password' && method === 'POST') return await changeOwnPassword(request, env, user);
       if (path === '/api/tasks' && method === 'GET') return await listTasks(env, user, url);
+      if (path === '/api/tasks/mine' && method === 'POST') return await createOwnTask(request, env, user);
 
       // Per-task routes: permissions are checked inside each handler
       const taskMatch = path.match(/^\/api\/tasks\/(\d+)$/);
@@ -1023,9 +1119,10 @@ export default {
       if (avMatch && method === 'DELETE') return await removeAvatar(env, user, Number(avMatch[1]));
 
       // Everything below is admin only
+      // (/api/tasks/mine is open to members too: they add tasks for themselves)
       const adminOnly =
         (path === '/api/tasks' && method === 'POST') ||
-        path === '/api/tasks/mine' ||
+        /^\/api\/log(\/|$)/.test(path) ||
         path === '/api/users' ||
         /^\/api\/users\/\d+$/.test(path) ||
         path === '/api/teams' ||
@@ -1035,7 +1132,10 @@ export default {
       if (adminOnly && user.role !== 'admin') return fail(403, 'Admins only.');
 
       if (path === '/api/tasks' && method === 'POST') return await createTasks(request, env, user);
-      if (path === '/api/tasks/mine' && method === 'POST') return await createOwnTask(request, env, user);
+
+      if (path === '/api/log' && method === 'GET') return await listLog(env, user);
+      if (path === '/api/log/unread' && method === 'GET') return json({ unread: await unreadCount(env, user) });
+      if (path === '/api/log/seen' && method === 'POST') return await markLogSeen(request, env, user);
 
       if (path === '/api/users' && method === 'GET') return await listUsers(env);
       // People and team changes: refresh every admin screen after a successful change

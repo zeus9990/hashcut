@@ -9,7 +9,7 @@
     loading: true,
     needsSetup: false,
     user: null,
-    view: 'mine', // mine | all | recurring | people | teams | sheets
+    view: 'mine', // mine | all | log | recurring | people | teams | sheets
     tasks: [],
     users: [],
     teams: [],
@@ -24,6 +24,10 @@
     resources: [], // saved sheets and materials
     resQuery: '',
     resCat: 'all',
+    log: [], // activity log entries (admins)
+    logSeen: 0, // how far the admin had read when the Log tab was opened (entries after it are "new")
+    logUnread: 0, // drives the red dot on the Log tab
+    logKind: 'all', // all | added | done | rescheduled
   };
   let animating = false;
   const live = { ws: null, on: false, wanted: false, retry: 0, retryTimer: null, pingTimer: null, refreshTimer: null, dirty: false, catchUp: false, hiddenAt: 0 };
@@ -79,6 +83,7 @@
     star: '<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>',
     copy: '<rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
     zap: '<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>',
+    log: '<line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/>',
     alert: '<path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>',
   };
 
@@ -342,15 +347,31 @@
   async function loadRecurring() { state.recurring = (await api('/recurring')).recurring; }
   async function loadResources() { state.resources = (await api('/resources')).resources; }
 
+  // The red dot only needs a count. A failure here (for example the log migration has not been run yet)
+  // must never stop the rest of the page from loading.
+  async function loadLogUnread() {
+    try { state.logUnread = (await api('/log/unread')).unread; } catch { /* keep the old count */ }
+  }
+  // Opening the log marks everything shown as read. `fresh` remembers what was new at that moment.
+  async function loadLog({ fresh = false } = {}) {
+    const r = await api('/log');
+    state.log = r.entries;
+    if (fresh) state.logSeen = r.seen_id;
+    const top = r.entries.length ? r.entries[0].id : 0;
+    if (top > r.seen_id) await api('/log/seen', { method: 'POST', body: { upto: top } });
+    state.logUnread = 0;
+  }
+
   async function enter() {
     state.view = 'mine';
     state.status = 'pending';
     state.person = 'all';
     state.team = 'all';
     state.flag = 'all';
+    state.logKind = 'all';
     state.animate = true;
     await loadTasks();
-    if (state.user.role === 'admin') await Promise.all([loadUsers(), loadTeams()]);
+    if (state.user.role === 'admin') await Promise.all([loadUsers(), loadTeams(), loadLogUnread()]);
     render();
     startLive();
   }
@@ -365,6 +386,7 @@
       if (view === 'people' || view === 'teams') await Promise.all([loadUsers(), loadTeams()]);
       else if (view === 'recurring') await Promise.all([loadUsers(), loadRecurring()]);
       else if (view === 'sheets') await loadResources();
+      else if (view === 'log') await Promise.all([loadUsers(), loadLog({ fresh: true })]);
       else {
         await loadTasks();
         if (view === 'all') await Promise.all([loadUsers(), loadTeams()]);
@@ -410,6 +432,10 @@
       if (state.user.role === 'admin') await Promise.all([loadUsers(), loadTeams()]);
       if (state.view === 'recurring' && state.user.role === 'admin') await loadRecurring();
       if (state.view === 'sheets') await loadResources();
+      if (state.user.role === 'admin') {
+        if (state.view === 'log') await loadLog(); // already looking at it: new entries count as read
+        else await loadLogUnread();
+      }
     } catch {
       return;
     }
@@ -698,7 +724,7 @@
   function shell() {
     const admin = state.user.role === 'admin';
     const tabs = [['mine', 'My tasks', 'Mine', 'tasks']];
-    if (admin) tabs.push(['all', 'All tasks', 'All', 'layers'], ['recurring', 'Repeating', 'Repeat', 'repeat'], ['people', 'People', 'People', 'users'], ['teams', 'Teams', 'Teams', 'tag']);
+    if (admin) tabs.push(['all', 'All tasks', 'All', 'layers'], ['log', 'Log', 'Log', 'log'], ['recurring', 'Repeating', 'Repeat', 'repeat'], ['people', 'People', 'People', 'users'], ['teams', 'Teams', 'Teams', 'tag']);
     tabs.push(['sheets', 'Sheets', 'Sheets', 'grid']);
 
     const nav = h(
@@ -710,7 +736,10 @@
           { class: 'tab' + (state.view === key ? ' on' : ''), type: 'button', 'aria-current': state.view === key ? 'page' : null, onclick: () => go(key) },
           icon(ic, 20),
           h('span', { class: 't-full' }, label),
-          h('span', { class: 't-short', 'aria-hidden': 'true' }, short)
+          h('span', { class: 't-short', 'aria-hidden': 'true' }, short),
+          key === 'log' && state.logUnread > 0
+            ? h('i', { class: 'dot', role: 'img', 'aria-label': `${state.logUnread} unread in the log` })
+            : null
         )
       )
     );
@@ -724,7 +753,7 @@
     );
 
     const page =
-      state.view === 'people' ? peopleView() : state.view === 'teams' ? teamsView() : state.view === 'recurring' ? recurringView() : state.view === 'sheets' ? sheetsView() : taskView(state.view === 'all');
+      state.view === 'people' ? peopleView() : state.view === 'teams' ? teamsView() : state.view === 'recurring' ? recurringView() : state.view === 'sheets' ? sheetsView() : state.view === 'log' ? logView() : taskView(state.view === 'all');
     page.classList.add('has-nav');
     return h('div', null, header, page);
   }
@@ -794,7 +823,7 @@
         ? h('button', { class: 'btn primary', type: 'button', onclick: () => taskDialog() }, icon('plus', 18), 'Assign task')
         : isAdmin
         ? h('button', { class: 'btn primary', type: 'button', onclick: () => taskDialog() }, icon('plus', 18), 'Add my task')
-        : null
+        : h('button', { class: 'btn primary', type: 'button', onclick: () => taskDialog() }, icon('plus', 18), 'Add task')
     );
 
     const parts = [head];
@@ -912,6 +941,7 @@
       { class: 'chips' },
       t.priority && open ? h('span', { class: `chip prio p${t.priority}` }, icon('zap', 13), PRIO_LABEL[t.priority]) : null,
       t.repeat ? h('span', { class: 'chip repeat' }, icon('repeat', 13), REPEAT_SHORT[t.repeat]) : null,
+      t.self_added && !personal ? h('span', { class: 'chip self' }, icon('plus', 13), 'Self-added') : null,
       dueChip,
       blockers.length ? h('span', { class: 'chip blocked' }, icon('alert', 13), 'Blocked') : null,
       all ? h('span', { class: 'chip person' }, avatar(t.assignee_name, person), t.assignee_name + (t.assignee_team ? ` · ${t.assignee_team}` : '')) : null
@@ -938,10 +968,10 @@
     if (mine && !personal && open) {
       actions.push(h('button', { class: 'link warn', type: 'button', onclick: () => blockerDialog(t) }, icon('alert', 14), 'Report a blocker'));
     }
-    if (manage) {
-      actions.push(h('button', { class: 'link', type: 'button', onclick: () => taskDialog(t) }, 'Edit'));
-      actions.push(h('button', { class: 'link danger', type: 'button', onclick: () => removeTask(t) }, 'Delete'));
-    }
+    // Members can edit tasks they added for themselves (not delete them); admins manage everything.
+    const ownAdded = mine && !personal && t.self_added && state.user.role === 'member';
+    if (manage || ownAdded) actions.push(h('button', { class: 'link', type: 'button', onclick: () => taskDialog(t) }, 'Edit'));
+    if (manage) actions.push(h('button', { class: 'link danger', type: 'button', onclick: () => removeTask(t) }, 'Delete'));
 
     const li = h(
       'li',
@@ -1094,7 +1124,7 @@
     });
     form.append(
       h('h2', null, title),
-      ...fields,
+      ...fields.filter(Boolean), // DOM append() would print a null field as the word "null"
       err,
       h('div', { class: 'dlg-actions' }, h('button', { class: 'btn', type: 'button', onclick: () => dlg.close() }, 'Cancel'), btn)
     );
@@ -1198,15 +1228,17 @@
     );
     const repeatFields = !personal && !editing ? scheduleFields({ repeat: opts.repeating ? 'daily' : '' }, (rep) => { deadlineLabel.hidden = rep; }) : [];
 
+    const isAdmin = state.user.role === 'admin';
     formDialog({
       title: opts.repeating ? 'Add a repeating task' : personal ? (editing ? 'Edit your task' : 'Add a task for yourself') : editing ? 'Edit task' : 'Assign a task',
       submit: opts.repeating ? 'Schedule task' : editing ? 'Save changes' : personal ? 'Add task' : 'Assign task',
       fields: [
+        !isAdmin ? h('p', { class: 'hint' }, editing ? 'Your admin is told when you change the deadline.' : 'Your admin can see tasks you add, and is told when you add or finish one.') : null,
         h('label', { class: 'field' }, h('span', null, 'Title'), h('input', { type: 'text', name: 'title', required: true, maxlength: 200, value: task ? task.title : '' })),
         h('label', { class: 'field' }, h('span', null, 'Details (optional)'), h('textarea', { name: 'description', maxlength: 2000 }, task ? task.description : '')),
         deadlineLabel,
         ...repeatFields,
-        priorityField(task ? task.priority : 0),
+        isAdmin ? priorityField(task ? task.priority : 0) : null, // only admins set priority
         assigneeField,
       ],
       onSubmit: async (fd) => {
@@ -1710,6 +1742,78 @@
     );
   }
 
+  /* ---------- activity log (admins) ---------- */
+
+  const LOG_KINDS = [
+    ['all', 'All'],
+    ['added', 'Added'],
+    ['done', 'Finished'],
+    ['rescheduled', 'Deadline changed'],
+  ];
+  const LOG_ICON = { added: 'plus', done: 'check', rescheduled: 'clock' };
+  const fmtWhen = (iso) => {
+    if (!iso) return 'no deadline';
+    const d = new Date(iso);
+    return `${fmtDate(d)}, ${fmtTime(d)}`;
+  };
+
+  // One sentence per entry, built from text nodes only.
+  function logSentence(e) {
+    const title = h('strong', { class: 'log-task' }, `“${e.task_title}”`);
+    if (e.kind === 'added') {
+      return [h('strong', null, e.actor_name), ' added a task for themselves: ', title, e.new_value ? ` · due ${fmtWhen(e.new_value)}` : ' · no deadline'];
+    }
+    if (e.kind === 'done') return [h('strong', null, e.actor_name), ' finished ', title];
+    return [h('strong', null, e.actor_name), ' changed the deadline of ', title, ` from ${fmtWhen(e.old_value)} to ${fmtWhen(e.new_value)}`];
+  }
+
+  function logView() {
+    const entries = state.log;
+    const count = (k) => (k === 'all' ? entries.length : entries.filter((e) => e.kind === k).length);
+    const shown = state.logKind === 'all' ? entries : entries.filter((e) => e.kind === state.logKind);
+
+    const head = h(
+      'div',
+      { class: 'page-head' },
+      h('div', null, h('h1', null, 'Activity log'), h('p', { class: 'summary' }, 'When employees add tasks for themselves, finish them or change a deadline. Kept for 90 days.'))
+    );
+
+    const chips = h(
+      'div',
+      { class: 'cat-row', role: 'group', 'aria-label': 'Filter the log' },
+      LOG_KINDS.map(([key, label]) =>
+        h('button', { type: 'button', class: 'cat' + (state.logKind === key ? ' on' : ''), 'aria-pressed': String(state.logKind === key), onclick: () => { state.logKind = key; render(); } }, label, h('span', { class: 'n' }, count(key)))
+      )
+    );
+
+    if (!entries.length) {
+      return h('main', { class: 'page' }, head, emptyState('Nothing logged yet. It fills up when an employee adds a task for themselves, finishes one or moves a deadline.'));
+    }
+
+    const items = shown.map((e, i) => {
+      const person = state.users.find((u) => u.id === e.actor_id);
+      const fresh = e.id > state.logSeen;
+      const when = new Date(e.created_at);
+      const li = h(
+        'li',
+        { class: 'log-item k-' + e.kind + (fresh ? ' is-new' : '') },
+        h('span', { class: 'log-ico' }, icon(LOG_ICON[e.kind], 18)),
+        avatar(e.actor_name, person),
+        h(
+          'div',
+          { class: 'log-body' },
+          h('p', null, logSentence(e)),
+          h('small', null, `${timeAgo(e.created_at)} · ${fmtDate(when)}, ${fmtTime(when)}`)
+        ),
+        fresh ? h('span', { class: 'new-tag' }, 'New') : null
+      );
+      li.style.setProperty('--i', Math.min(i, 12));
+      return li;
+    });
+
+    return h('main', { class: 'page' }, head, chips, shown.length ? h('ul', { class: 'log-list' }, items) : emptyState('Nothing of this kind yet.'));
+  }
+
   /* ---------- teams ---------- */
 
   function teamDialog(team) {
@@ -1786,6 +1890,9 @@
     state.users = [];
     state.recurring = [];
     state.resources = [];
+    state.log = [];
+    state.logUnread = 0;
+    state.logSeen = 0;
     state.animate = true;
     stopLive();
     closeMenus();

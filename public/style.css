@@ -463,6 +463,39 @@ fieldset { border: 1px solid var(--line); border-radius: var(--radius-sm); margi
 .alert-cta { margin-left: auto; text-decoration: underline; white-space: nowrap; }
 @keyframes nudge { 0%, 88%, 100% { transform: rotate(0); } 92% { transform: rotate(-12deg); } 96% { transform: rotate(10deg); } }
 
+/* red dot on the Log tab when there is something unread */
+.tab { position: relative; }
+.dot {
+  position: absolute; top: .38rem; right: .5rem; width: .6rem; height: .6rem; border-radius: 50%;
+  background: #e5322d; box-shadow: 0 0 0 2px var(--surface); animation: dotPulse 2s ease-in-out infinite;
+}
+@keyframes dotPulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.25); } }
+
+/* tasks people added for themselves */
+.chip.self { background: var(--accent-soft); color: var(--accent); }
+
+/* activity log */
+.log-list { display: grid; gap: .6rem; }
+.log-item {
+  display: grid; grid-template-columns: auto auto 1fr auto; gap: .75rem; align-items: center;
+  padding: .8rem 1rem; background: var(--surface); border: 1px solid var(--line); border-left: 5px solid var(--line-strong);
+  border-radius: var(--radius); box-shadow: var(--shadow);
+}
+.log-item.k-added { border-left-color: var(--blue); }
+.log-item.k-done { border-left-color: var(--accent); }
+.log-item.k-rescheduled { border-left-color: var(--amber); }
+.log-item.is-new { background: color-mix(in srgb, #e5322d 7%, var(--surface)); }
+.log-ico { display: grid; place-items: center; width: 2rem; height: 2rem; border-radius: 50%; background: var(--chip); color: var(--muted); }
+.k-added .log-ico { background: var(--blue-soft); color: var(--blue); }
+.k-done .log-ico { background: var(--accent-soft); color: var(--accent); }
+.k-rescheduled .log-ico { background: var(--soon-soft); color: var(--soon); }
+.log-item .avatar { width: 2.2rem; height: 2.2rem; font-size: .8rem; }
+.log-body { min-width: 0; display: grid; gap: .1rem; }
+.log-body p { overflow-wrap: anywhere; }
+.log-body small { color: var(--muted); }
+.new-tag { background: #e5322d; color: #fff; font-size: .72rem; font-weight: 700; padding: .12rem .55rem; border-radius: 999px; }
+.animate-in .log-item { animation: rise .55s cubic-bezier(.2, .8, .2, 1) backwards; animation-delay: calc(var(--i, 0) * 55ms + 60ms); }
+
 /* empty-state illustration */
 .empty-art { display: grid; place-items: center; margin-bottom: .5rem; animation: bob 4.5s ease-in-out infinite; }
 .empty-art .e-card { stroke: var(--line-strong); stroke-width: 2.5; fill: var(--surface-2); }
@@ -495,6 +528,9 @@ fieldset { border: 1px solid var(--line); border-radius: var(--radius-sm); margi
   .tab { flex: 1 1 0; min-width: 0; justify-content: center; flex-direction: column; gap: .15rem; padding: .45rem .1rem; font-size: .68rem; border-radius: 12px; }
   .t-full { display: none; }
   .t-short { display: inline; }
+  .dot { top: .3rem; right: auto; left: calc(50% + .55rem); }
+  .log-item { grid-template-columns: auto 1fr auto; }
+  .log-item .avatar { display: none; }
   .res-list { grid-template-columns: 1fr; }
   .res-foot { flex-wrap: wrap; }
   .page { padding: 1.15rem .9rem 2rem; }
